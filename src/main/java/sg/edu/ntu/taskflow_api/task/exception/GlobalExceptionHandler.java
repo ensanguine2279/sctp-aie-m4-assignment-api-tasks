@@ -1,17 +1,23 @@
 package sg.edu.ntu.taskflow_api.task.exception;
 
 import java.time.Instant;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.ErrorResponse;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+
+import jakarta.validation.ConstraintViolationException;
 
 import sg.edu.ntu.taskflow_api.task.dto.ErrorResponseDto;
 
@@ -49,6 +55,46 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponseDto> handleAuthentication(AuthenticationException ex) {
         return new ResponseEntity<>(new ErrorResponseDto("Authentication failed", Instant.now()),
                 HttpStatus.UNAUTHORIZED);
+    }
+
+    /**
+     * A request body failed @Valid. One "field: message" entry per problem, sorted
+     * for a stable message.
+     */
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ErrorResponseDto> handleValidation(MethodArgumentNotValidException ex) {
+        String message = ex.getBindingResult().getFieldErrors().stream()
+                .map(e -> e.getField() + ": " + e.getDefaultMessage())
+                .sorted()
+                .collect(Collectors.joining("; "));
+        return new ResponseEntity<>(new ErrorResponseDto(message, Instant.now()), HttpStatus.BAD_REQUEST);
+    }
+
+    /** A path variable or parameter has the wrong type, e.g. /api/tasks/abc. */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ErrorResponseDto> handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
+        return new ResponseEntity<>(
+                new ErrorResponseDto("Invalid value for '" + ex.getName() + "'", Instant.now()),
+                HttpStatus.BAD_REQUEST);
+    }
+
+    /**
+     * Unparseable JSON, or a value that does not fit the type, e.g. an unknown
+     * priority.
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ErrorResponseDto> handleUnreadable(HttpMessageNotReadableException ex) {
+        return new ResponseEntity<>(new ErrorResponseDto("Malformed request body", Instant.now()),
+                HttpStatus.BAD_REQUEST);
+    }
+
+    @ExceptionHandler(ConstraintViolationException.class)
+    public ResponseEntity<ErrorResponseDto> handleConstraintViolation(ConstraintViolationException ex) {
+        String message = ex.getConstraintViolations().stream()
+                .map(v -> v.getPropertyPath() + ": " + v.getMessage())
+                .sorted()
+                .collect(Collectors.joining("; "));
+        return new ResponseEntity<>(new ErrorResponseDto(message, Instant.now()), HttpStatus.BAD_REQUEST);
     }
 
     @ExceptionHandler(Exception.class)

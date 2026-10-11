@@ -1,34 +1,28 @@
-# ==========================================
-# Stage 1: Build the Application
-# ==========================================
-FROM eclipse-temurin:21-jdk-alpine AS builder
+# ---------- Build stage ----------
+FROM eclipse-temurin:21-jdk-alpine AS build
 WORKDIR /app
 
-# Copy Maven wrapper and POM configuration first (utilizes Docker layer caching for dependencies)
+# Dependency definition first, so this layer is cached until pom.xml changes.
 COPY .mvn/ .mvn
 COPY mvnw pom.xml ./
 RUN chmod +x mvnw
 RUN ./mvnw dependency:go-offline
 
-# Copy source code and build the JAR executable without running unit tests
 COPY src ./src
+# Tests run in the CI stage, not in the image build. They generate their own
+# throwaway RSA keys, so no key material is needed or copied here.
 RUN ./mvnw clean package -DskipTests
 
-# ==========================================
-# Stage 2: Runtime Container
-# ==========================================
+# ---------- Runtime stage ----------
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
-# Run as a non-root user for security compliance
 RUN addgroup -S spring && adduser -S spring -G spring
+
+# Only the built JAR is copied. No key is ever part of the image: the public
+# key is mounted at runtime (/run/secrets/jwt_public_key under Compose).
+COPY --from=build /app/target/*.jar app.jar
+
 USER spring:spring
 
-# Copy built JAR artifact from builder stage
-COPY --from=builder /app/target/*.jar app.jar
-
-# Expose User Service port
-EXPOSE 8080
-
-# Configure JVM flags for container resource limits and run
 ENTRYPOINT ["java", "-XX:+UseG1GC", "-XX:MaxRAMPercentage=75.0", "-jar", "app.jar"]

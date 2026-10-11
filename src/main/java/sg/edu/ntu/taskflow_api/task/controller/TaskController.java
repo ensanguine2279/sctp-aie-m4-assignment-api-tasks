@@ -3,17 +3,21 @@ package sg.edu.ntu.taskflow_api.task.controller;
 import java.util.List;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
-import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
-import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import jakarta.validation.Valid;
+
+import sg.edu.ntu.taskflow_api.task.dto.CreateTaskRequestDto;
+import sg.edu.ntu.taskflow_api.task.dto.UpdateTaskRequestDto;
 import sg.edu.ntu.taskflow_api.task.entity.Task;
 import sg.edu.ntu.taskflow_api.task.service.TaskService;
 
@@ -40,15 +44,16 @@ public class TaskController {
 
     @PostMapping
     @PreAuthorize("hasAnyRole('ADMIN', 'MANAGER')")
-    public ResponseEntity<Task> createTask(@RequestBody Task task) {
-        taskService.createTask(task);
+    public ResponseEntity<Task> createTask(@Valid @RequestBody CreateTaskRequestDto request) {
+        Task task = request.toEntity();
+        taskService.createTask(task); // save() fills in the generated id on this instance
         return ResponseEntity.status(HttpStatus.CREATED).body(task);
     }
 
     @PutMapping("/{id}")
     @PreAuthorize("hasAnyRole('ADMIN', 'MANAGER')")
-    public ResponseEntity<Task> updateTask(@PathVariable Long id, @RequestBody Task task) {
-        return ResponseEntity.ok(taskService.updateTask(id, task));
+    public ResponseEntity<Task> updateTask(@PathVariable Long id, @Valid @RequestBody UpdateTaskRequestDto request) {
+        return ResponseEntity.ok(taskService.updateTask(id, request.toEntity()));
     }
 
     @PutMapping("/{id}/complete")

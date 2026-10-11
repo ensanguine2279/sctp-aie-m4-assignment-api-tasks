@@ -9,7 +9,6 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Table;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.NotBlank;
@@ -34,22 +33,23 @@ public class Task {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private long id;
 
-    @Column(name = "title")
+    @Column(name = "title", nullable = false)
     @NotBlank(message = "Title is mandatory")
     private String title;
 
     @Column(name = "description")
     private String description;
 
-    @Column(name = "priority")
+    @Column(name = "priority", nullable = false)
     @Enumerated(EnumType.STRING)
     @NotNull(message = "Priority is mandatory")
     private TaskPriority priority;
 
-    @Column(name = "completed")
+    @Column(name = "completed", nullable = false)
+    @NotNull(message = "Completed status is mandatory")
     private boolean completed;
 
-    @JoinColumn(name = "user_id", nullable = false)
+    @Column(name = "user_id", nullable = false)
     @NotNull(message = "User is mandatory")
     private Long userId;
 
@@ -60,15 +60,5 @@ public class Task {
         this.priority = priority;
         this.completed = completed;
         this.userId = userId;
-    }
-
-    public void setPriority(TaskPriority priority) {
-        this.priority = priority;
-    }
-
-    // Sets the priority of the task using a string representation of the priority
-    // enum
-    public void setPriority(String priority) {
-        this.priority = TaskPriority.valueOf(priority);
     }
 }

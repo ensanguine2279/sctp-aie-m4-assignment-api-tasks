@@ -1,0 +1,61 @@
+services:
+  tasks-db:
+    image: postgres:16-alpine
+    container_name: tasks-db
+    environment:
+      POSTGRES_DB: ${DB_NAME_ENV:-taskdb}
+      POSTGRES_USER: ${DB_USER_ENV:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD_ENV:-postgrespassword}
+    ports:
+      # Host port 5433 by default so it does not clash with the users service's database on 5432.
+      - "${DB_PORT_ENV:-5433}:5432"
+    volumes:
+      - tasks_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER_ENV:-postgres} -d ${DB_NAME_ENV:-taskdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tasks-network
+
+  tasks-service:
+    build: .
+    image: ensanguine/task-service:1.0.0
+    container_name: tasks-service
+    depends_on:
+      tasks-db:
+        condition: service_healthy
+    environment:
+      - DB_HOST=tasks-db            # Docker DNS name of the database service
+      - DB_PORT=5432                # port inside the network, not the published host port
+      - DB_NAME=${DB_NAME_ENV:-taskdb}
+      - DB_USER=${DB_USER_ENV:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD_ENV:-postgrespassword}
+      - APP_PORT=${APP_PORT_ENV:-8077}
+      # Path INSIDE the container where the secret below is mounted.
+      - JWT_PUBLIC_KEY_PATH=/run/secrets/jwt_public_key
+      # Must be exactly the same as the users service.
+      - JWT_ISSUER=${JWT_ISSUER_ENV:-user-service}
+      - JWT_AUDIENCE=${JWT_AUDIENCE_ENV:-taskflow-api}
+    ports:
+      # Same variable on both sides: the app listens on APP_PORT.
+      - "${APP_PORT_ENV:-8077}:${APP_PORT_ENV:-8077}"
+    secrets:
+      - jwt_public_key
+    # No `user:` override is needed. public.pem is not secret and openssl creates it
+    # world-readable (644), so the non-root `spring` user from the Dockerfile can read it.
+    networks:
+      - tasks-network
+
+networks:
+  tasks-network:
+    driver: bridge
+
+volumes:
+  tasks_db_data:
+
+secrets:
+  jwt_public_key:
+    # Path on the HOST. Compose does not expand "~", so the default uses ${HOME}.
+    file: ${JWT_PUBLIC_KEY_FILE:-${HOME}/.taskflow/keys/public.pem}
