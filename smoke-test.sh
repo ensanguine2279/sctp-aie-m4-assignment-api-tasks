@@ -71,9 +71,12 @@ elif cmd == "signed":          # properly RS256-signed token with chosen claims
     a.add_argument("--sub", default="smoke"); a.add_argument("--iss", required=True)
     a.add_argument("--aud", required=True); a.add_argument("--exp-offset", type=int, default=3600)
     a.add_argument("--roles", default="ROLE_ADMIN")
+    a.add_argument("--uid", type=int, default=1)
+    a.add_argument("--no-uid", action="store_true")
     x = a.parse_args(); now = int(time.time()); exp = now + x.exp_offset
     claims = {"iss": x.iss, "aud": [x.aud], "sub": x.sub, "iat": min(now, exp - 3600), "exp": exp,
               "roles": [r for r in x.roles.split(",") if r]}
+    if not x.no_uid: claims["uid"] = x.uid
     si = f"{enc({'alg': 'RS256', 'typ': 'JWT'})}.{enc(claims)}"
     print(si + "." + rs256(x.key, si))
 elif cmd == "check":           # does a token match the shared contract?
@@ -84,10 +87,12 @@ elif cmd == "check":           # does a token match the shared contract?
     if aud not in got: bad.append(f"aud is {got}")
     for c in ("sub", "iat", "exp"):
         if c not in p: bad.append(f"missing {c}")
+    uid = p.get("uid")
+    if isinstance(uid, bool) or not isinstance(uid, int) or uid <= 0: bad.append(f"uid is {uid}")
     roles = p.get("roles")
     if not isinstance(roles, list) or not all(isinstance(r, str) and r.startswith("ROLE_") for r in roles):
         bad.append(f"roles is {roles}")
-    print("; ".join(bad) if bad else f"alg=RS256 iss={iss} aud={got} sub={p['sub']} roles={roles}")
+    print("; ".join(bad) if bad else f"alg=RS256 iss={iss} aud={got} sub={p['sub']} uid={uid} roles={roles}")
     sys.exit(1 if bad else 0)
 PY
 forge() { python3 "$TMP/forge.py" "$@"; }
@@ -181,6 +186,8 @@ if [[ -r "$PRIVATE_KEY" ]]; then
   expect_status "real key, ROLE_USER only, on an admin/manager route" 403
   with_token "$TASKS_URL/api/tasks" "$(forge signed "$PRIVATE_KEY" --iss "$ISSUER" --aud "$AUDIENCE" --roles "ADMIN,FACTOR_PASSWORD")"
   expect_status "real key, roles without the ROLE_ prefix" 403
+  with_token "$TASKS_URL/api/tasks" "$(forge signed "$PRIVATE_KEY" --iss "$ISSUER" --aud "$AUDIENCE" --no-uid)"
+  expect_status "real key, no uid claim" 401
   with_token "$TASKS_URL/api/tasks" "$(forge signed "$PRIVATE_KEY" --iss "$ISSUER" --aud "wrong-audience")"
   expect_status "real key, wrong audience" 401
   with_token "$TASKS_URL/api/tasks" "$(forge signed "$PRIVATE_KEY" --iss "wrong-issuer" --aud "$AUDIENCE")"
@@ -192,6 +199,86 @@ if [[ -r "$PRIVATE_KEY" ]]; then
 else
   note "checks that sign with the real key: $PRIVATE_KEY not readable"
 fi
+
+# ---------- 6. ownership ----------
+section "Task ownership (two throwaway users, one task)"
+stamp="$(date +%s)"
+OWNER_NAME="smk${stamp}a"; OTHER_NAME="smk${stamp}b"; SMOKE_PASS="Smoke-pass-1"
+OWNER_ID=""; OTHER_ID=""; TASK_ID=""
+
+json_id() { sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' <<<"$1" | head -1; }
+create_user() {  # name -> prints the new id
+  req POST "$USERS_URL/api/users" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$1\",\"password\":\"$SMOKE_PASS\",\"name\":\"Smoke Test\",\"role\":\"USER\"}"
+  json_id "$BODY"
+}
+login_token() {  # name -> prints a JWT
+  req POST "$USERS_URL/auth/login" -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$1\",\"password\":\"$SMOKE_PASS\"}"
+  grep -oE 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+' <<<"$BODY" | head -1 || true
+}
+
+OWNER_ID="$(create_user "$OWNER_NAME")"
+OTHER_ID="$(create_user "$OTHER_NAME")"
+if [[ -z "$OWNER_ID" || -z "$OTHER_ID" ]]; then
+  bad "could not create the two test users on the users service (admin POST /api/users)"
+else
+  OWNER_TOKEN="$(login_token "$OWNER_NAME")"
+  OTHER_TOKEN="$(login_token "$OTHER_NAME")"
+  if [[ -z "$OWNER_TOKEN" || -z "$OTHER_TOKEN" ]]; then
+    bad "the two test users could not log in"
+  else
+    if detail="$(forge check "$OWNER_TOKEN" "$ISSUER" "$AUDIENCE")"; then ok "a plain user's token matches the contract ($detail)"; else bad "a plain user's token breaks the contract: $detail"; fi
+
+    # An admin creates a task owned by the first user.
+    req POST "$TASKS_URL/api/tasks" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+      -d "{\"title\":\"Smoke task\",\"priority\":\"LOW\",\"completed\":false,\"userId\":$OWNER_ID}"
+    expect_status "admin creates a task owned by the first user" 201
+    TASK_ID="$(json_id "$BODY")"
+
+    if [[ -z "$TASK_ID" ]]; then
+      bad "the create response has no task id: ${BODY:0:160}"
+    else
+      T="$TASKS_URL/api/tasks/$TASK_ID"
+      with_token "$T" "$OWNER_TOKEN";  expect_status "owner can read their task" 200
+      with_token "$T" "$OTHER_TOKEN";  expect_status "another user gets 404 for it" 404
+      with_token "$T" "$TOKEN";        expect_status "an admin can read it" 200
+
+      # The list of one user's tasks: that user, or an admin or manager.
+      LIST_OWNER="$TASKS_URL/api/tasks/user/$OWNER_ID"
+      with_token "$LIST_OWNER" "$OWNER_TOKEN"; expect_status "owner can list their own tasks" 200
+      if grep -Eq "\"id\"[[:space:]]*:[[:space:]]*$TASK_ID([^0-9]|\$)" <<<"$BODY"; then ok "...and the list contains the task"; else bad "the owner's list does not contain task $TASK_ID: ${BODY:0:160}"; fi
+      with_token "$LIST_OWNER" "$OTHER_TOKEN"; expect_status "another user cannot list someone else's tasks" 403
+      with_token "$TASKS_URL/api/tasks/user/$OTHER_ID" "$OWNER_TOKEN"; expect_status "owner cannot list another user's tasks" 403
+      with_token "$LIST_OWNER" "$TOKEN";       expect_status "an admin can list any user's tasks" 200
+
+      req PUT "$T/complete" -H "Authorization: Bearer $OTHER_TOKEN"
+      expect_status "another user cannot complete it (404)" 404
+      with_token "$T" "$TOKEN"
+      if grep -Eq '"completed"[[:space:]]*:[[:space:]]*false' <<<"$BODY"; then ok "...and the task is still not completed"; else bad "the task was changed by a user who does not own it: ${BODY:0:160}"; fi
+
+      req PUT "$T/complete" -H "Authorization: Bearer $OWNER_TOKEN"
+      expect_status "owner can complete their task" 200
+      if grep -Eq '"completed"[[:space:]]*:[[:space:]]*true' <<<"$BODY"; then ok "...and it is now completed"; else bad "completing did not set completed: ${BODY:0:160}"; fi
+
+      # Owning a task does not lift the role rules.
+      req PUT "$T" -H "Authorization: Bearer $OWNER_TOKEN" -H 'Content-Type: application/json' \
+        -d '{"title":"Edited","priority":"HIGH","completed":false}'
+      expect_status "owner (plain user) cannot edit the task" 403
+      req DELETE "$T" -H "Authorization: Bearer $OWNER_TOKEN"
+      expect_status "owner (plain user) cannot delete the task" 403
+      with_token "$TASKS_URL/api/tasks" "$OWNER_TOKEN"
+      expect_status "plain user cannot list all tasks" 403
+
+      req DELETE "$T" -H "Authorization: Bearer $TOKEN"
+      expect_status "admin deletes the smoke task" 200
+    fi
+  fi
+fi
+# Always remove the throwaway users, even after a failure.
+for uid_to_delete in "$OWNER_ID" "$OTHER_ID"; do
+  [[ -n "$uid_to_delete" ]] && curl -s -o /dev/null -X DELETE "$USERS_URL/api/users/$uid_to_delete" -H "Authorization: Bearer $TOKEN" || true
+done
 
 # ---------- 6. restart ----------
 if $DO_RESTART; then

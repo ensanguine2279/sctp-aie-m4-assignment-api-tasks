@@ -4,7 +4,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -79,7 +78,10 @@ class TaskControllerSecurityTest {
 
     @BeforeEach
     void stubService() {
-        Task sample = new Task("Write tests", "Role rules", TaskPriority.HIGH, false, 1L);
+        // Owned by the user id every test token carries, so ownership never interferes
+        // here.
+        // Ownership has its own test: TaskControllerOwnershipTest.
+        Task sample = new Task("Write tests", "Role rules", TaskPriority.HIGH, false, TestJwtKeys.DEFAULT_UID);
         when(taskService.findAllTasks()).thenReturn(List.of(sample));
         when(taskService.findTaskById(anyLong())).thenReturn(sample);
         when(taskService.updateTask(anyLong(), any(Task.class))).thenReturn(sample);
@@ -92,6 +94,10 @@ class TaskControllerSecurityTest {
         List<Route> routes = List.of(
                 new Route(HttpMethod.GET, "/api/tasks", null, ADMIN_OR_MANAGER, 200),
                 new Route(HttpMethod.GET, "/api/tasks/1", null, ANY_AUTHENTICATED, 200),
+                // every test token carries uid 42: that is "their own" list, and 99 is someone
+                // else's
+                new Route(HttpMethod.GET, "/api/tasks/user/" + TestJwtKeys.DEFAULT_UID, null, ANY_AUTHENTICATED, 200),
+                new Route(HttpMethod.GET, "/api/tasks/user/99", null, ADMIN_OR_MANAGER, 200),
                 new Route(HttpMethod.POST, "/api/tasks", TASK_JSON, ADMIN_OR_MANAGER, 201),
                 new Route(HttpMethod.PUT, "/api/tasks/1", TASK_JSON, ADMIN_OR_MANAGER, 200),
                 new Route(HttpMethod.PUT, "/api/tasks/1/complete", null, ANY_AUTHENTICATED, 200),

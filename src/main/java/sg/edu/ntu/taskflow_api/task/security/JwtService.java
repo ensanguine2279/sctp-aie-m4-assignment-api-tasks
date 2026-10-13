@@ -32,6 +32,7 @@ public class JwtService {
     private static final long CLOCK_SKEW_SECONDS = 30;
 
     private static final String ROLE_PREFIX = "ROLE_";
+    private static final String USER_ID_CLAIM = "uid";
 
     private final PublicKey publicKey;
     private final String issuer;
@@ -95,7 +96,27 @@ public class JwtService {
             throw new InvalidTokenException(Reason.MALFORMED, "Token has no expiry");
         }
 
-        return new ClaimsDto(username, extractRoles(claims), expiration.getTime());
+        long userId = extractUserId(claims);
+
+        return new ClaimsDto(username, extractRoles(claims), expiration.getTime(), userId);
+    }
+
+    /**
+     * The users service puts the caller's database id in the "uid" claim, as a JSON
+     * number. It is required: without it the tasks API cannot tell whose task is
+     * whose, so a token lacking a valid uid is rejected like one lacking a subject.
+     * Strings, booleans, fractions, zero and negative values are all refused.
+     */
+    private long extractUserId(Claims claims) {
+        Object uid = claims.get(USER_ID_CLAIM);
+        if (uid instanceof Number number) {
+            long value = number.longValue();
+            // The double comparison rejects 1.5 and numbers too large for a long.
+            if (value > 0 && number.doubleValue() == (double) value) {
+                return value;
+            }
+        }
+        throw new InvalidTokenException(Reason.MALFORMED, "Token has no valid uid");
     }
 
     private List<String> extractRoles(Claims claims) {

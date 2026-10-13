@@ -23,6 +23,10 @@ public class TaskServiceImpl implements TaskService {
         return taskRepository.findAll();
     }
 
+    public List<Task> findTasksByUserId(long userId) {
+        return taskRepository.findByUserId(userId);
+    }
+
     public Task findTaskById(long id) {
         Task task = taskRepository.findById(id).orElseThrow(() -> new TaskNotFoundException(id));
         return task;

@@ -7,8 +7,8 @@ services:
       POSTGRES_USER: ${DB_USER_ENV:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD_ENV:-postgrespassword}
     ports:
-      # Host port 5433 by default so it does not clash with the users service's database on 5432.
-      - "${DB_PORT_ENV:-5433}:5432"
+      # Host port 5477 by default so it does not clash with the users service's database on 5422.
+      - "${DB_HOST_PORT_ENV:-5477}:5432"
     volumes:
       - tasks_db_data:/var/lib/postgresql/data
     healthcheck:
@@ -27,8 +27,8 @@ services:
       tasks-db:
         condition: service_healthy
     environment:
-      - DB_HOST=tasks-db            # Docker DNS name of the database service
-      - DB_PORT=5432                # port inside the network, not the published host port
+      - DB_HOST=tasks-db # Docker DNS name of the database service
+      - DB_PORT=5432 # port inside the network, not the published host port
       - DB_NAME=${DB_NAME_ENV:-taskdb}
       - DB_USER=${DB_USER_ENV:-postgres}
       - DB_PASSWORD=${DB_PASSWORD_ENV:-postgrespassword}

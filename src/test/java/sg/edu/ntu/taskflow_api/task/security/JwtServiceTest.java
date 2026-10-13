@@ -9,12 +9,16 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
+import java.util.stream.Stream;
 
 import javax.crypto.SecretKey;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
@@ -56,6 +60,7 @@ class JwtServiceTest {
         ClaimsDto claims = service.extractClaims(token);
 
         assertThat(claims.username()).isEqualTo("alice");
+        assertThat(claims.userId()).isEqualTo(TestJwtKeys.DEFAULT_UID);
         assertThat(claims.roles()).containsExactly("ROLE_USER", "ROLE_ADMIN");
         assertThat(claims.expiration()).isGreaterThan(System.currentTimeMillis());
     }
@@ -77,6 +82,7 @@ class JwtServiceTest {
                 .contains("\"iss\":\"users-service\"")
                 .contains("\"aud\":[\"tasks-api\"]")
                 .contains("\"sub\":\"alice\"")
+                .contains("\"uid\":42")
                 .contains("\"roles\":[\"ROLE_ADMIN\"]")
                 .contains("\"iat\":")
                 .contains("\"exp\":");
@@ -176,6 +182,34 @@ class JwtServiceTest {
         assertThat(rejected("").getReason()).isEqualTo(Reason.EMPTY);
         assertThat(rejected("   ").getReason()).isEqualTo(Reason.EMPTY);
         assertThat(rejected(null).getReason()).isEqualTo(Reason.EMPTY);
+    }
+
+    // ---------- uid ----------
+
+    @Test
+    void uidBeyondTheIntRangeIsAccepted() {
+        long big = 5_000_000_000L;
+        String token = TestJwtKeys.sign(TestJwtKeys.baseBuilder("alice", List.of("ROLE_USER")).claim("uid", big));
+
+        assertThat(service.extractClaims(token).userId()).isEqualTo(big);
+    }
+
+    static Stream<Arguments> invalidUids() {
+        return Stream.of(
+                Arguments.of("missing", null),
+                Arguments.of("a string", "42"),
+                Arguments.of("a boolean", true),
+                Arguments.of("zero", 0),
+                Arguments.of("negative", -5),
+                Arguments.of("fractional", 1.5));
+    }
+
+    @ParameterizedTest(name = "uid {0} is rejected")
+    @MethodSource("invalidUids")
+    void rejectsAnInvalidUid(String label, Object uid) {
+        String token = TestJwtKeys.sign(TestJwtKeys.baseBuilder("alice", List.of("ROLE_USER")).claim("uid", uid));
+
+        assertThat(rejected(token).getReason()).isEqualTo(Reason.MALFORMED);
     }
 
     // ---------- roles ----------

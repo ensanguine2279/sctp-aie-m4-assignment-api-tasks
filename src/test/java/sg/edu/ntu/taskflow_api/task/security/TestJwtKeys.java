@@ -20,18 +20,22 @@ import io.jsonwebtoken.Jwts;
 
 /**
  * Test helper. Generates throwaway RSA key pairs once per JVM, writes the
- * public half to a temp file, and builds tokens shaped like the users service's.
+ * public half to a temp file, and builds tokens shaped like the users
+ * service's.
  *
  * The values below deliberately differ from the production defaults, which is
  * fine because tests override the properties through register(...).
  *
  * Every @SpringBootTest must call register(...) from a @DynamicPropertySource,
- * or the context fails on "Could not resolve placeholder 'jwt.public-key-path'".
+ * or the context fails on "Could not resolve placeholder
+ * 'jwt.public-key-path'".
  */
 public final class TestJwtKeys {
 
     public static final String ISSUER = "users-service";
     public static final String AUDIENCE = "tasks-api";
+    /** The "uid" claim that baseBuilder puts in every token. */
+    public static final long DEFAULT_UID = 42L;
 
     private static final KeyPair SIGNER = generate();
     private static final KeyPair OTHER = generate();
@@ -62,9 +66,9 @@ public final class TestJwtKeys {
 
     /**
      * A builder with the same claims as the users service: iss, aud (serialised
-     * as an array), sub, iat, exp (+1h) and roles. Not yet signed, so a test can
-     * change any claim before calling sign(...). Passing a null username or null
-     * roles leaves that claim out.
+     * as an array), sub, uid, iat, exp (+1h) and roles. Not yet signed, so a test
+     * can change any claim before calling sign(...). Passing a null username or
+     * null roles leaves that claim out.
      */
     public static JwtBuilder baseBuilder(String username, List<String> roles) {
         Date now = new Date();
@@ -74,10 +78,19 @@ public final class TestJwtKeys {
                 .subject(username)
                 .issuedAt(now)
                 .expiration(new Date(now.getTime() + 3_600_000L))
-                .claim("roles", roles);
+                .claim("roles", roles)
+                .claim("uid", DEFAULT_UID);
     }
 
-    /** Like baseBuilder, but expiring offsetMs from now (negative = already expired). */
+    /** Like baseBuilder, but with a chosen "uid" claim. */
+    public static JwtBuilder baseBuilder(String username, List<String> roles, long uid) {
+        return baseBuilder(username, roles).claim("uid", uid);
+    }
+
+    /**
+     * Like baseBuilder, but expiring offsetMs from now (negative = already
+     * expired).
+     */
     public static JwtBuilder expiringIn(String username, List<String> roles, long offsetMs) {
         long exp = System.currentTimeMillis() + offsetMs;
         return baseBuilder(username, roles)

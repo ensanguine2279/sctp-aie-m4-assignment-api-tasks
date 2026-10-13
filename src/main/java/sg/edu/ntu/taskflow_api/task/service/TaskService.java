@@ -8,6 +8,8 @@ import sg.edu.ntu.taskflow_api.task.exception.TaskNotFoundException;
 public interface TaskService {
     List<Task> findAllTasks();
 
+    List<Task> findTasksByUserId(long userId);
+
     Task findTaskById(long id) throws TaskNotFoundException;
 
     void createTask(Task task);
