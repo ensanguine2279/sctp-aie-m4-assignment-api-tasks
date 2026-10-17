@@ -1,6 +1,6 @@
 # Module 4 Assignment - TaskFlow Tasks API
 
-A Spring Boot REST service that manages tasks for the TaskFlow system. It enforces token-based authorization and granular task ownership rules by verifying RS256 JWT tokens issued by the Users Service.
+A Spring Boot REST service that manages tasks for the TaskFlow system. It enforces token-based authorization and granular task ownership rules by verifying RS256 JWT tokens issued by the [Users Service](https://github.com/ensanguine2279/sctp-aie-m4-assignment-api-users).
 
 ## Features
 
