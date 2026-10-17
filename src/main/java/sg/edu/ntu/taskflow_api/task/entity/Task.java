@@ -11,6 +11,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.NotBlank;
 
 import lombok.AllArgsConstructor;
@@ -51,6 +52,7 @@ public class Task {
 
     @Column(name = "user_id", nullable = false)
     @NotNull(message = "User is mandatory")
+    @Positive(message = "User ID must be positive")
     private Long userId;
 
     // Constructor for creating a task with a unique ID generated automatically

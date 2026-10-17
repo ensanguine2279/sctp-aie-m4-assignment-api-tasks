@@ -24,6 +24,9 @@ public class TaskAccessPolicy {
 
     private static final Set<String> PRIVILEGED_ROLES = Set.of("ROLE_ADMIN", "ROLE_MANAGER");
 
+    // Checks if the authenticated user can access the given task.
+    // A user may access a task if they are privileged or if the task belongs to
+    // them.
     public boolean canAccess(Authentication authentication, Task task) {
         if (authentication == null) {
             return false;
@@ -38,5 +41,23 @@ public class TaskAccessPolicy {
                 && task.getUserId() != null
                 && authentication.getPrincipal() instanceof AuthenticatedUser user
                 && task.getUserId() == user.userId();
+    }
+
+    // Checks if the authenticated user can access tasks belonging to the given
+    // userId.
+    // A user may access tasks belonging to the given userId if they are privileged
+    // or if the userId matches their own.
+    public boolean canAccess(Authentication authentication, long userId) {
+        if (authentication == null) {
+            return false;
+        }
+        boolean privileged = authentication.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .anyMatch(PRIVILEGED_ROLES::contains);
+        if (privileged) {
+            return true;
+        }
+        return authentication.getPrincipal() instanceof AuthenticatedUser user
+                && user.userId() == userId;
     }
 }

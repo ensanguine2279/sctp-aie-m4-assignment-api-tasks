@@ -28,12 +28,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import org.mockito.ArgumentCaptor;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 // Spring Boot 4 package. On Boot 3 it was org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -114,6 +117,34 @@ class TaskControllerTest {
                 assertThat(sent.getValue().getUserId()).isEqualTo(1L);
         }
 
+        /*
+        @Test
+        void createReturns409WhenConstraintIsViolated() throws Exception {
+                doThrow(new org.springframework.dao.DataIntegrityViolationException("Duplicate task title"))
+                                .when(taskService).createTask(any(Task.class));
+
+                mockMvc.perform(post("/api/tasks").header(HttpHeaders.AUTHORIZATION, adminToken())
+                                .contentType(MediaType.APPLICATION_JSON).content(VALID_CREATE))
+                                .andExpect(status().isConflict())
+                                .andExpect(jsonPath("$.message").exists());
+        }
+        */
+       
+        @ParameterizedTest(name = "create: invalid userId = {0}")
+        @ValueSource(longs = { 0L, -1L })
+        void createRejectsNonPositiveUserId(long invalidUserId) throws Exception {
+                String body = String.format(
+                                "{\"title\":\"t\",\"priority\":\"HIGH\",\"completed\":false,\"userId\":%d}",
+                                invalidUserId);
+
+                mockMvc.perform(post("/api/tasks").header(HttpHeaders.AUTHORIZATION, adminToken())
+                                .contentType(MediaType.APPLICATION_JSON).content(body))
+                                .andExpect(status().isBadRequest())
+                                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("userId")));
+
+                verifyNoInteractions(taskService);
+        }
+
         /**
          * Regression: a client-supplied id must never reach save(), or POST would
          * overwrite that task.
@@ -130,6 +161,17 @@ class TaskControllerTest {
                 ArgumentCaptor<Task> sent = ArgumentCaptor.forClass(Task.class);
                 verify(taskService).createTask(sent.capture());
                 assertThat(sent.getValue().getId()).isZero();
+        }
+
+        @Test
+        void createAcceptsMissingDescription() throws Exception {
+                String payloadWithoutDescription = """
+                                {"title":"No description task","priority":"HIGH","completed":false,"userId":1}""";
+
+                mockMvc.perform(post("/api/tasks").header(HttpHeaders.AUTHORIZATION, adminToken())
+                                .contentType(MediaType.APPLICATION_JSON).content(payloadWithoutDescription))
+                                .andExpect(status().isCreated())
+                                .andExpect(jsonPath("$.description").value(org.hamcrest.Matchers.nullValue()));
         }
 
         @Test

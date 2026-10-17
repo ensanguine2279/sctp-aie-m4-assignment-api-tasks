@@ -1,5 +1,6 @@
 package sg.edu.ntu.taskflow_api.task.controller;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import org.springframework.http.HttpStatus;
@@ -8,6 +9,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -53,9 +55,17 @@ public class TaskController {
     }
 
     @GetMapping("/user/{userId}")
-    @PreAuthorize("hasAnyRole('ADMIN', 'MANAGER') or @userSecurity.isSelf(#userId, authentication)")
-    public ResponseEntity<List<Task>> getTasksByUserId(@PathVariable Long userId) {
-        return ResponseEntity.ok(taskService.findTasksByUserId(userId));
+    public ResponseEntity<List<Task>> getTasksByUserId(@PathVariable Long userId, Authentication authentication) {
+        List<Task> tasks = new ArrayList<>();
+
+        // Check if the authenticated user can access tasks for the given userId.
+        // If the user is not allowed to access tasks for the given userId, the tasks
+        // list remains empty. This prevents unauthorized users from seeing tasks they
+        // should not have access to and prevents id probing.
+        if (accessPolicy.canAccess(authentication, userId)) {
+            tasks = taskService.findTasksByUserId(userId);
+        }
+        return ResponseEntity.ok(tasks);
     }
 
     @PostMapping
@@ -72,11 +82,14 @@ public class TaskController {
         return ResponseEntity.ok(taskService.updateTask(id, request.toEntity()));
     }
 
-    @PutMapping("/{id}/complete")
+    @PatchMapping("/{id}/complete")
     public ResponseEntity<Task> markTaskAsCompleted(@PathVariable Long id, Authentication authentication) {
-        findAccessibleTask(id, authentication); // 404 unless the caller may access this task
+        Task task = findAccessibleTask(id, authentication); // 404 unless the caller may access this task
+
         taskService.markTaskAsCompleted(id);
-        return ResponseEntity.ok(taskService.findTaskById(id));
+
+        task.setCompleted(true);
+        return ResponseEntity.ok(task);
     }
 
     @DeleteMapping("/{id}")

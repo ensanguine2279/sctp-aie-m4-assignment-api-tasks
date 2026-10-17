@@ -1,61 +1,71 @@
 services:
-  tasks-db:
+  # ----------------------------------------------------
+  # 1. Dedicated PostgreSQL Database for Task Service
+  # ----------------------------------------------------
+  task-db:
     image: postgres:16-alpine
-    container_name: tasks-db
+    container_name: task-db
     environment:
-      POSTGRES_DB: ${DB_NAME_ENV:-taskdb}
-      POSTGRES_USER: ${DB_USER_ENV:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASSWORD_ENV:-postgrespassword}
+      POSTGRES_DB: ${DB_NAME_ENV}
+      POSTGRES_USER: ${DB_USER_ENV}
+      POSTGRES_PASSWORD: ${DB_PASSWORD_ENV}
     ports:
-      # Host port 5477 by default so it does not clash with the users service's database on 5422.
-      - "${DB_HOST_PORT_ENV:-5477}:5432"
+      - "${DB_HOST_PORT_ENV:-5477}:5432" # Host:Container port mapping
     volumes:
-      - tasks_db_data:/var/lib/postgresql/data
+      - task_db_data:/var/lib/postgresql/data # Persistent storage
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER_ENV:-postgres} -d ${DB_NAME_ENV:-taskdb}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER_ENV} -d ${DB_NAME_ENV}"]
       interval: 5s
       timeout: 5s
       retries: 5
     networks:
       - tasks-network
 
-  tasks-service:
-    build: .
-    image: ensanguine/task-service:1.0.0
-    container_name: tasks-service
-    depends_on:
-      tasks-db:
-        condition: service_healthy
-    environment:
-      - DB_HOST=tasks-db # Docker DNS name of the database service
-      - DB_PORT=5432 # port inside the network, not the published host port
-      - DB_NAME=${DB_NAME_ENV:-taskdb}
-      - DB_USER=${DB_USER_ENV:-postgres}
-      - DB_PASSWORD=${DB_PASSWORD_ENV:-postgrespassword}
-      - APP_PORT=${APP_PORT_ENV:-8077}
-      # Path INSIDE the container where the secret below is mounted.
-      - JWT_PUBLIC_KEY_PATH=/run/secrets/jwt_public_key
-      # Must be exactly the same as the users service.
-      - JWT_ISSUER=${JWT_ISSUER_ENV:-user-service}
-      - JWT_AUDIENCE=${JWT_AUDIENCE_ENV:-taskflow-api}
+  # ----------------------------------------------------
+  # 2. Task Microservice Application
+  # ----------------------------------------------------
+  task-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ensanguine/task-service:latest
+    container_name: task-service
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}" # Ensures the container runs with the same UID and GID as the host user
     ports:
-      # Same variable on both sides: the app listens on APP_PORT.
       - "${APP_PORT_ENV:-8077}:${APP_PORT_ENV:-8077}"
+    environment:
+      - APP_PORT=${APP_PORT_ENV}
+      - DB_HOST=${DB_HOST_ENV}
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME_ENV}
+      - DB_USER=${DB_USER_ENV}
+      - DB_PASSWORD=${DB_PASSWORD_ENV}
+      - JWT_PUBLIC_KEY_PATH=/run/secrets/jwt_public_key # Path inside the container 
+      - JWT_EXPIRATION_MS=${JWT_EXPIRATION_MS_ENV}
+      - JWT_ISSUER=${JWT_ISSUER_ENV}
+      - JWT_AUDIENCE=${JWT_AUDIENCE_ENV}
     secrets:
       - jwt_public_key
-    # No `user:` override is needed. public.pem is not secret and openssl creates it
-    # world-readable (644), so the non-root `spring` user from the Dockerfile can read it.
+    depends_on:
+      task-db:
+        condition: service_healthy # Waits for DB healthcheck to pass before booting Spring Boot
     networks:
       - tasks-network
 
+# ----------------------------------------------------
+# 3. Secrets Management for JWT Private Key
+# ----------------------------------------------------
+secrets:
+  jwt_public_key:
+    file: ${JWT_PUBLIC_KEY_PATH:-${HOME}/.taskflow/keys/public.pem}
+
+# ----------------------------------------------------
+# 4. Shared Infrastructure (Network & Storage)
+# ----------------------------------------------------
 networks:
   tasks-network:
+    name: tasks-network
     driver: bridge
 
 volumes:
-  tasks_db_data:
-
-secrets:
-  jwt_public_key:
-    # Path on the HOST. Compose does not expand "~", so the default uses ${HOME}.
-    file: ${JWT_PUBLIC_KEY_FILE:-${HOME}/.taskflow/keys/public.pem}
+  task_db_data:

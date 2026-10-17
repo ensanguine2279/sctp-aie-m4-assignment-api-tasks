@@ -2,7 +2,7 @@ package sg.edu.ntu.taskflow_api.task.dto;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-
+import jakarta.validation.constraints.Positive;
 import sg.edu.ntu.taskflow_api.task.entity.Task;
 import sg.edu.ntu.taskflow_api.task.entity.TaskPriority;
 
@@ -30,7 +30,7 @@ public record CreateTaskRequestDto(
         String description,
         @NotNull(message = "Priority is mandatory") TaskPriority priority,
         @NotNull(message = "Completed status is mandatory") Boolean completed,
-        @NotNull(message = "User is mandatory") Long userId) {
+        @NotNull(message = "User is mandatory") @Positive(message = "User ID must be positive") Long userId) {
 
     /** Call only after validation: userId and completed are unboxed here. */
     public Task toEntity() {
