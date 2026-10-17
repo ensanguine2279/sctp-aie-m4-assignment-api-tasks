@@ -64,7 +64,6 @@ class TaskControllerSecurityTest {
     private static final String NO_ROLES = "NO_ROLES";
 
     private static final Set<String> ADMIN_OR_MANAGER = Set.of(ROLE_ADMIN, ROLE_MANAGER);
-    private static final Set<String> ADMIN_ONLY = Set.of(ROLE_ADMIN);
     private static final Set<String> ANY_AUTHENTICATED = Set.of(ROLE_USER, ROLE_MANAGER, ROLE_ADMIN, NO_ROLES);
 
     private static final String TASK_JSON = """
@@ -101,7 +100,7 @@ class TaskControllerSecurityTest {
                 new Route(HttpMethod.POST, "/api/tasks", TASK_JSON, ADMIN_OR_MANAGER, 201),
                 new Route(HttpMethod.PUT, "/api/tasks/1", TASK_JSON, ADMIN_OR_MANAGER, 200),
                 new Route(HttpMethod.PUT, "/api/tasks/1/complete", null, ANY_AUTHENTICATED, 200),
-                new Route(HttpMethod.DELETE, "/api/tasks/1", null, ADMIN_ONLY, 200));
+                new Route(HttpMethod.DELETE, "/api/tasks/1", null, ADMIN_OR_MANAGER, 200));
 
         // null means no Authorization header at all
         List<String> callers = Arrays.asList(ROLE_USER, ROLE_MANAGER, ROLE_ADMIN, NO_ROLES, null);

@@ -12,6 +12,9 @@ import io.jsonwebtoken.MalformedJwtException;
 import io.jsonwebtoken.UnsupportedJwtException;
 import io.jsonwebtoken.security.SignatureException;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -27,6 +30,7 @@ import sg.edu.ntu.taskflow_api.task.exception.InvalidTokenException.Reason;
  */
 @Service
 public class JwtService {
+    private static final Logger logger = LoggerFactory.getLogger(JwtService.class);
 
     /** Absorbs small clock differences between services. */
     private static final long CLOCK_SKEW_SECONDS = 30;
@@ -42,6 +46,8 @@ public class JwtService {
             @Value("${jwt.public-key-path}") String publicKeyPath,
             @Value("${jwt.issuer}") String issuer,
             @Value("${jwt.audience}") String audience) {
+
+        logger.info("Loading public key from path: {}", publicKeyPath);
 
         if (issuer == null || issuer.isBlank() || audience == null || audience.isBlank()) {
             throw new IllegalStateException("jwt.issuer and jwt.audience must both be set");

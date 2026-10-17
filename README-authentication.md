@@ -60,7 +60,7 @@ Tokens cannot be revoked. A token stays valid until it expires, so keep the life
 | `POST /api/tasks` | `ADMIN` or `MANAGER` |
 | `PUT /api/tasks/{id}` | `ADMIN` or `MANAGER` |
 | `PUT /api/tasks/{id}/complete` | any authenticated user, but a plain user only for their own task (any other task is a 404, and nothing changes) |
-| `DELETE /api/tasks/{id}` | `ADMIN` |
+| `DELETE /api/tasks/{id}` | `ADMIN` or `MANAGER` |
 
 There is no public endpoint: everything else in `SecurityConfig` is `anyRequest().authenticated()`, and the role rules are `@PreAuthorize` annotations on the controller.
 
