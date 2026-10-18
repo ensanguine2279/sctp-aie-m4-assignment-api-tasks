@@ -56,6 +56,7 @@ public class SecurityConfig {
                                 // This service issues no tokens, so there is no public login route.
                                 // Everything needs a valid token.
                                 .authorizeHttpRequests(auth -> auth
+                                                .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                                                 .anyRequest().authenticated())
 
                                 // Register JWT filter to run before username/password authentication

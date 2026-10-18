@@ -11,7 +11,7 @@ import sg.edu.ntu.taskflow_api.task.entity.Task;
 import sg.edu.ntu.taskflow_api.task.entity.TaskPriority;
 import sg.edu.ntu.taskflow_api.task.repository.TaskRepository;
 
-@Profile("dev")
+//@Profile("dev")
 @Component
 public class DataLoader {
         private final TaskRepository taskRepository;
