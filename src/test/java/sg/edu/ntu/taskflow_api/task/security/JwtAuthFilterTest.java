@@ -109,8 +109,6 @@ class JwtAuthFilterTest {
 
         filter.doFilter(request, response, chain);
 
-        // The filter does not write a 401 itself. The chain continues and the
-        // entry point rejects the unauthenticated request using this attribute.
         assertThat(chain.getRequest()).isNotNull();
         assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
         assertThat(recordedRejection()).isNotNull();

@@ -39,9 +39,6 @@ class JwtServiceTest {
         service = new JwtService(TestJwtKeys.publicKeyPath(), TestJwtKeys.ISSUER, TestJwtKeys.AUDIENCE);
     }
 
-    /**
-     * Runs extractClaims and returns the rejection. Fails if the token is accepted.
-     */
     private InvalidTokenException rejected(String token) {
         try {
             service.extractClaims(token);
@@ -72,7 +69,6 @@ class JwtServiceTest {
         assertThat(service.extractClaims(token).username()).isEqualTo("alice");
     }
 
-    /** Pins the token shape the users service issues, including aud as an array. */
     @Test
     void acceptsTokenShapedLikeTheUsersService() {
         String token = TestJwtKeys.sign(TestJwtKeys.baseBuilder("alice", List.of("ROLE_ADMIN")));
@@ -96,7 +92,6 @@ class JwtServiceTest {
 
     @Test
     void rejectsTokenExpiredBeyondSkew() {
-        // Must exceed the 30s skew: -5_000 would still be accepted.
         String token = TestJwtKeys.sign(TestJwtKeys.expiringIn("alice", List.of("ROLE_USER"), -120_000));
 
         assertThat(rejected(token).getReason()).isEqualTo(Reason.EXPIRED);
@@ -116,14 +111,10 @@ class JwtServiceTest {
         String forged = TestJwtKeys.sign(TestJwtKeys.baseBuilder("mallory", List.of("ROLE_ADMIN")));
         String[] a = genuine.split("\\.");
         String[] b = forged.split("\\.");
-        // genuine header + forged payload + genuine signature
         String tampered = a[0] + "." + b[1] + "." + a[2];
 
         assertThat(rejected(tampered).getReason()).isEqualTo(Reason.BAD_SIGNATURE);
     }
-
-    // For the next three, only the exception type is asserted: jjwt reports
-    // these through different exception classes, so the reason is not pinned.
 
     @Test
     void rejectsWrongIssuer() {
@@ -142,7 +133,6 @@ class JwtServiceTest {
 
     @Test
     void rejectsHs256TokenKeyedWithThePublicKey() {
-        // The classic algorithm-confusion attack.
         SecretKey forgedKey = Keys.hmacShaKeyFor(TestJwtKeys.keyPair().getPublic().getEncoded());
         String token = TestJwtKeys.baseBuilder("mallory", List.of("ROLE_ADMIN"))
                 .signWith(forgedKey, Jwts.SIG.HS256)
@@ -245,6 +235,24 @@ class JwtServiceTest {
     }
 
     // ---------- construction (fail fast) ----------
+
+    @Test
+    void loadsFromBase64KeyVariable() {
+        String rawPem = TestJwtKeys.toPem("PUBLIC KEY", TestJwtKeys.keyPair().getPublic().getEncoded());
+        JwtService base64Service = new JwtService(rawPem, null, TestJwtKeys.ISSUER, TestJwtKeys.AUDIENCE);
+
+        String token = TestJwtKeys.sign(TestJwtKeys.baseBuilder("alice", List.of("ROLE_USER")));
+        ClaimsDto claims = base64Service.extractClaims(token);
+
+        assertThat(claims.username()).isEqualTo("alice");
+    }
+
+    @Test
+    void failsFastWhenBothBase64AndPathAreMissing() {
+        assertThatThrownBy(() -> new JwtService("   ", "", TestJwtKeys.ISSUER, TestJwtKeys.AUDIENCE))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Neither 'jwt.public-key-base64' nor 'jwt.public-key-path'");
+    }
 
     @Test
     void failsFastWhenKeyFileIsMissing() {

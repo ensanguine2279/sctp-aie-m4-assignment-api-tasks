@@ -1,7 +1,6 @@
 package sg.edu.ntu.taskflow_api.task.security;
 
 import java.security.PublicKey;
-import java.util.Date;
 import java.util.List;
 
 import io.jsonwebtoken.Claims;
@@ -15,6 +14,7 @@ import io.jsonwebtoken.security.SignatureException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -42,20 +42,27 @@ public class JwtService {
     private final String issuer;
     private final String audience;
 
+    @Autowired
     public JwtService(
-            @Value("${jwt.public-key-path}") String publicKeyPath,
+            @Value("${jwt.public-key-base64:}") String base64Key,
+            @Value("${jwt.public-key-path:}") String publicKeyPath,
             @Value("${jwt.issuer}") String issuer,
             @Value("${jwt.audience}") String audience) {
 
-        logger.info("Loading public key from path: {}", publicKeyPath);
+        logger.info("Loading public key from source: base64Key={}, publicKeyPath={}",
+                base64Key != null && !base64Key.isBlank(), publicKeyPath);
 
         if (issuer == null || issuer.isBlank() || audience == null || audience.isBlank()) {
             throw new IllegalStateException("jwt.issuer and jwt.audience must both be set");
         }
         // Fails fast (IllegalStateException) if the key is missing or malformed.
-        this.publicKey = PemKeyLoader.loadPublicKey(publicKeyPath);
+        this.publicKey = PemKeyLoader.loadPublicKey(base64Key, publicKeyPath);
         this.issuer = issuer;
         this.audience = audience;
+    }
+
+    public JwtService(String keyPath, String issuer, String audience) {
+        this(null, keyPath, issuer, audience);
     }
 
     private Claims parseToken(String token) {
@@ -88,23 +95,21 @@ public class JwtService {
     }
 
     public ClaimsDto extractClaims(String token) {
-        // The signature is verified before the payload is read, so a tampered
-        // token throws before getSubject() is reached.
         Claims claims = parseToken(token);
 
         String username = claims.getSubject();
         if (username == null || username.isBlank()) {
-            throw new InvalidTokenException(Reason.MALFORMED, "Token has no subject");
+            throw new InvalidTokenException(Reason.MALFORMED, "Token is missing subject");
         }
 
-        Date expiration = claims.getExpiration();
-        if (expiration == null) {
-            throw new InvalidTokenException(Reason.MALFORMED, "Token has no expiry");
-        }
+        if (claims.getExpiration() == null) {
+        throw new InvalidTokenException(Reason.MALFORMED, "Token missing required 'exp' claim");
+    }
 
-        long userId = extractUserId(claims);
+        Long userId = extractUserId(claims);
+        List<String> roles = extractRoles(claims);
 
-        return new ClaimsDto(username, extractRoles(claims), expiration.getTime(), userId);
+        return new ClaimsDto(username, roles, claims.getExpiration().getTime(), userId);
     }
 
     /**
@@ -113,27 +118,32 @@ public class JwtService {
      * whose, so a token lacking a valid uid is rejected like one lacking a subject.
      * Strings, booleans, fractions, zero and negative values are all refused.
      */
-    private long extractUserId(Claims claims) {
-        Object uid = claims.get(USER_ID_CLAIM);
-        if (uid instanceof Number number) {
-            long value = number.longValue();
-            // The double comparison rejects 1.5 and numbers too large for a long.
-            if (value > 0 && number.doubleValue() == (double) value) {
-                return value;
-            }
+    private Long extractUserId(Claims claims) {
+        Object uidObj = claims.get("uid");
+        if (uidObj == null) {
+            throw new InvalidTokenException(Reason.MALFORMED, "Token missing required 'uid' claim");
         }
-        throw new InvalidTokenException(Reason.MALFORMED, "Token has no valid uid");
+        if (uidObj instanceof Number num) {
+            double val = num.doubleValue();
+            if (val <= 0 || val != Math.floor(val)) {
+                throw new InvalidTokenException(Reason.MALFORMED, "Claim 'uid' must be a positive integer");
+            }
+            return num.longValue();
+        }
+        throw new InvalidTokenException(Reason.MALFORMED, "Claim 'uid' must be a number");
     }
 
     private List<String> extractRoles(Claims claims) {
         Object rolesClaim = claims.get("roles");
+
+        // Safely casts only verified String instances
         if (!(rolesClaim instanceof List<?> roles)) {
             return List.of();
         }
 
         return roles.stream()
-                .filter(String.class::isInstance)
-                .map(String.class::cast)
+                .filter(String.class::isInstance) // Safely ignores non-String elements (e.g., numbers, nulls)
+                .map(String.class::cast) // Safely casts only verified String instances
                 .filter(role -> role.startsWith(ROLE_PREFIX))
                 .toList();
     }

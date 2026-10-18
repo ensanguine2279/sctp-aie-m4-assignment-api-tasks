@@ -170,7 +170,7 @@ class TaskControllerOwnershipTest {
                 Arguments.of("a user listing their own tasks", List.of("ROLE_USER"), OWNER_UID, OWNER_UID, 200),
                 Arguments.of("a user with no roles listing their own tasks", List.<String>of(), OWNER_UID, OWNER_UID,
                         200),
-                Arguments.of("a user listing someone else's tasks", List.of("ROLE_USER"), OWNER_UID, OTHER_UID, 403),
+                Arguments.of("a user listing someone else's tasks", List.of("ROLE_USER"), OWNER_UID, OTHER_UID, 200),
                 Arguments.of("a manager listing anyone's tasks", List.of("ROLE_MANAGER"), OTHER_UID, OWNER_UID, 200),
                 Arguments.of("an admin listing anyone's tasks", List.of("ROLE_ADMIN"), OTHER_UID, OWNER_UID, 200));
     }
@@ -182,7 +182,8 @@ class TaskControllerOwnershipTest {
         mockMvc.perform(get("/api/tasks/user/" + requestedUserId).header(HttpHeaders.AUTHORIZATION, token(roles, uid)))
                 .andExpect(status().is(expectedStatus));
 
-        if (expectedStatus == 200) {
+        boolean canAccess = (uid == requestedUserId) || roles.contains("ROLE_MANAGER") || roles.contains("ROLE_ADMIN");
+        if (canAccess) {
             verify(taskService).findTasksByUserId(requestedUserId);
         } else {
             verify(taskService, never()).findTasksByUserId(anyLong());

@@ -17,6 +17,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -118,18 +119,20 @@ class TaskControllerTest {
         }
 
         /*
-        @Test
-        void createReturns409WhenConstraintIsViolated() throws Exception {
-                doThrow(new org.springframework.dao.DataIntegrityViolationException("Duplicate task title"))
-                                .when(taskService).createTask(any(Task.class));
+         * @Test
+         * void createReturns409WhenConstraintIsViolated() throws Exception {
+         * doThrow(new org.springframework.dao.
+         * DataIntegrityViolationException("Duplicate task title"))
+         * .when(taskService).createTask(any(Task.class));
+         * 
+         * mockMvc.perform(post("/api/tasks").header(HttpHeaders.AUTHORIZATION,
+         * adminToken())
+         * .contentType(MediaType.APPLICATION_JSON).content(VALID_CREATE))
+         * .andExpect(status().isConflict())
+         * .andExpect(jsonPath("$.message").exists());
+         * }
+         */
 
-                mockMvc.perform(post("/api/tasks").header(HttpHeaders.AUTHORIZATION, adminToken())
-                                .contentType(MediaType.APPLICATION_JSON).content(VALID_CREATE))
-                                .andExpect(status().isConflict())
-                                .andExpect(jsonPath("$.message").exists());
-        }
-        */
-       
         @ParameterizedTest(name = "create: invalid userId = {0}")
         @ValueSource(longs = { 0L, -1L })
         void createRejectsNonPositiveUserId(long invalidUserId) throws Exception {
@@ -382,7 +385,7 @@ class TaskControllerTest {
                 done.setCompleted(true);
                 when(taskService.findTaskById(1L)).thenReturn(done);
 
-                mockMvc.perform(put("/api/tasks/1/complete").header(HttpHeaders.AUTHORIZATION, adminToken()))
+                mockMvc.perform(patch("/api/tasks/1/complete").header(HttpHeaders.AUTHORIZATION, adminToken()))
                                 .andExpect(status().isOk())
                                 .andExpect(jsonPath("$.completed").value(true));
 

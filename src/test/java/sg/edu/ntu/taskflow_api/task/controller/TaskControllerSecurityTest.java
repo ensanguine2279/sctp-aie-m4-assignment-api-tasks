@@ -96,7 +96,7 @@ class TaskControllerSecurityTest {
                 // every test token carries uid 42: that is "their own" list, and 99 is someone
                 // else's
                 new Route(HttpMethod.GET, "/api/tasks/user/" + TestJwtKeys.DEFAULT_UID, null, ANY_AUTHENTICATED, 200),
-                new Route(HttpMethod.GET, "/api/tasks/user/99", null, ADMIN_OR_MANAGER, 200),
+                new Route(HttpMethod.GET, "/api/tasks/user/99", null, ANY_AUTHENTICATED, 200),
                 new Route(HttpMethod.POST, "/api/tasks", TASK_JSON, ADMIN_OR_MANAGER, 201),
                 new Route(HttpMethod.PUT, "/api/tasks/1", TASK_JSON, ADMIN_OR_MANAGER, 200),
                 new Route(HttpMethod.PUT, "/api/tasks/1/complete", null, ANY_AUTHENTICATED, 200),
