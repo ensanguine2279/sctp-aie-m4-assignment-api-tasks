@@ -44,6 +44,7 @@ services:
       - JWT_EXPIRATION_MS=${JWT_EXPIRATION_MS_ENV}
       - JWT_ISSUER=${JWT_ISSUER_ENV}
       - JWT_AUDIENCE=${JWT_AUDIENCE_ENV}
+      - JWT_PUBLIC_KEY_BASE64=${JWT_PUBLIC_KEY_BASE64_ENV}
     secrets:
       - jwt_public_key
     depends_on:
