@@ -102,14 +102,16 @@ class TaskServiceImplTest {
     // ---------- update ----------
 
     @Test
-    void updateTaskCopiesTheFourEditableFields() {
-        Task existing = storedTask(5, 10);
+    void updateTaskCopiesEditableFieldsIncludingUserId() {
+        Task existing = storedTask(5, 10L);
         when(taskRepository.findById(5L)).thenReturn(Optional.of(existing));
+
         Task changes = Task.builder()
                 .title("New title")
                 .description("New description")
                 .priority(TaskPriority.HIGH)
                 .completed(true)
+                .userId(99L)
                 .build();
 
         Task result = service.updateTask(5, changes);
@@ -119,20 +121,22 @@ class TaskServiceImplTest {
         assertThat(result.getDescription()).isEqualTo("New description");
         assertThat(result.getPriority()).isEqualTo(TaskPriority.HIGH);
         assertThat(result.isCompleted()).isTrue();
+        assertThat(result.getUserId()).isEqualTo(99L); // Asserts userId is updated
         verify(taskRepository).save(existing);
     }
 
     @Test
-    void updateTaskNeverChangesTheIdOrTheOwner() {
-        Task existing = storedTask(5, 10);
+    void updateTaskChangesOwnerButNeverChangesId() {
+        Task existing = storedTask(5, 10L);
         when(taskRepository.findById(5L)).thenReturn(Optional.of(existing));
+
         Task changes = new Task("New title", "New description", TaskPriority.HIGH, true, 99L);
-        changes.setId(77);
+        changes.setId(77); // Attempting to alter ID to 77
 
         Task result = service.updateTask(5, changes);
 
-        assertThat(result.getId()).isEqualTo(5);
-        assertThat(result.getUserId()).isEqualTo(10L);
+        assertThat(result.getId()).isEqualTo(5); // ID remains locked to 5
+        assertThat(result.getUserId()).isEqualTo(99L); // Owner successfully updated to 99
     }
 
     @Test
