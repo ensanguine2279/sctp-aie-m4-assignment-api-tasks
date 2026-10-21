@@ -74,7 +74,7 @@ class TaskControllerTest {
         private static final String VALID_CREATE = """
                         {"title":"Write tests","description":"Role rules","priority":"HIGH","completed":false,"userId":1}""";
         private static final String VALID_UPDATE = """
-                        {"title":"New title","description":"New description","priority":"LOW","completed":true}""";
+                        {"title":"New title","description":"New description","priority":"LOW","completed":true,"userId":1}""";
 
         @Autowired
         MockMvc mockMvc;
@@ -266,11 +266,15 @@ class TaskControllerTest {
                 assertThat(sent.getValue().getDescription()).isEqualTo("New description");
                 assertThat(sent.getValue().getPriority()).isEqualTo(TaskPriority.LOW);
                 assertThat(sent.getValue().isCompleted()).isTrue();
+                assertThat(sent.getValue().getUserId()).isEqualTo(1L);
         }
 
-        /** Regression: a body cannot move a task to another owner or change its id. */
+        /**
+         * Regression: a body cannot change the task's primary key id, but can update
+         * the assignee userId.
+         */
         @Test
-        void updateIgnoresAnIdOrUserIdSuppliedByTheClient() throws Exception {
+        void updateIgnoresAnIdSuppliedByTheClientButPassesUserId() throws Exception {
                 when(taskService.updateTask(eq(1L), any(Task.class))).thenReturn(storedTask(1));
                 String sneaky = """
                                 {"id":77,"userId":99,"title":"t","priority":"LOW","completed":false}""";
@@ -281,33 +285,38 @@ class TaskControllerTest {
 
                 ArgumentCaptor<Task> sent = ArgumentCaptor.forClass(Task.class);
                 verify(taskService).updateTask(eq(1L), sent.capture());
-                assertThat(sent.getValue().getId()).isZero();
-                assertThat(sent.getValue().getUserId()).isNull();
+                assertThat(sent.getValue().getId()).isZero(); // ID is ignored
+                assertThat(sent.getValue().getUserId()).isEqualTo(99L); // userId is updated
         }
 
         static Stream<Arguments> invalidUpdateBodies() {
                 return Stream.of(
                                 Arguments.of("missing title", """
-                                                {"priority":"LOW","completed":false}""", "title: Title is mandatory"),
+                                                {"priority":"LOW","completed":false,"userId":1}""",
+                                                "title: Title is mandatory"),
                                 Arguments.of("blank title", """
-                                                {"title":"","priority":"LOW","completed":false}""",
+                                                {"title":"","priority":"LOW","completed":false,"userId":1}""",
                                                 "title: Title is mandatory"),
                                 Arguments.of("missing priority", """
-                                                {"title":"t","completed":false}""", "priority: Priority is mandatory"),
+                                                {"title":"t","completed":false,"userId":1}""",
+                                                "priority: Priority is mandatory"),
                                 Arguments.of("missing completed", """
-                                                {"title":"t","priority":"LOW"}""",
+                                                {"title":"t","priority":"LOW","userId":1}""",
                                                 "completed: Completed status is mandatory"),
                                 Arguments.of("completed is null", """
-                                                {"title":"t","priority":"LOW","completed":null}""",
+                                                {"title":"t","priority":"LOW","completed":null,"userId":1}""",
                                                 "completed: Completed status is mandatory"),
+                                Arguments.of("missing userId", """
+                                                {"title":"t","priority":"LOW","completed":false}""",
+                                                "userId: User ID is mandatory"),
                                 Arguments.of("everything missing", "{}",
                                                 "completed: Completed status is mandatory; priority: Priority is mandatory; "
-                                                                + "title: Title is mandatory"),
+                                                                + "title: Title is mandatory; userId: User ID is mandatory"),
                                 Arguments.of("unknown priority", """
-                                                {"title":"t","priority":"URGENT","completed":false}""",
+                                                {"title":"t","priority":"URGENT","completed":false,"userId":1}""",
                                                 "Malformed request body"),
                                 Arguments.of("completed is not a boolean", """
-                                                {"title":"t","priority":"LOW","completed":"maybe"}""",
+                                                {"title":"t","priority":"LOW","completed":"maybe","userId":1}""",
                                                 "Malformed request body"),
                                 Arguments.of("truncated JSON", "{\"title\":", "Malformed request body"));
         }

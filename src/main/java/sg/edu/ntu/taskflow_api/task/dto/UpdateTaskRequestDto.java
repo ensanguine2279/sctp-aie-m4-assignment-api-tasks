@@ -14,16 +14,15 @@ import sg.edu.ntu.taskflow_api.task.entity.TaskPriority;
  * owner of a task cannot be changed by an update. TaskServiceImpl.updateTask
  * copies only the four fields below onto the stored task.
  *
- * {@code completed} is mandatory because PUT replaces all four fields. It is a
- * Boolean
- * (wrapper) so that an omitted value is reported by validation, not by Jackson
- * (see CreateTaskRequest).
+ * Has no {@code id} (the id comes from the URL path).
+ * TaskServiceImpl.updateTask copies the five fields below onto the stored task.
  */
 public record UpdateTaskRequestDto(
         @NotBlank(message = "Title is mandatory") String title,
         String description,
         @NotNull(message = "Priority is mandatory") TaskPriority priority,
-        @NotNull(message = "Completed status is mandatory") Boolean completed) {
+        @NotNull(message = "Completed status is mandatory") Boolean completed,
+        @NotNull(message = "User ID is mandatory") Long userId) {
 
     /**
      * A Task carrying just the updatable fields, for TaskService.updateTask. Call
@@ -35,6 +34,7 @@ public record UpdateTaskRequestDto(
                 .description(description)
                 .priority(priority)
                 .completed(completed)
+                .userId(userId)
                 .build();
     }
 }
