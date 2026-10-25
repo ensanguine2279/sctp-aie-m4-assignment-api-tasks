@@ -54,6 +54,12 @@ services:
       - source: jwt_public_key
         target: jwt_public_key
         mode: 0444
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${APP_PORT_ENV}/actuator/health/liveness | grep -q UP || wget -qO- http://localhost:${APP_PORT_ENV}/actuator/health/liveness | grep -q UP"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 90s   
     networks:
       - tasks-network
     deploy:
@@ -61,6 +67,7 @@ services:
       update_config:
         parallelism: 1
         delay: 15s
+        monitor: 30s
         order: start-first
         failure_action: rollback
       rollback_config:
