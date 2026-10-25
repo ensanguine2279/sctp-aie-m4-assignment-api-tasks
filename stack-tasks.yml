@@ -1,0 +1,89 @@
+version: "3.8"
+
+# Deploy:  set -a; source .env; set +a; docker stack deploy -c stack-tasks.yml tasks
+# (docker stack deploy does NOT read .env by itself)
+
+services:
+  task-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME_ENV}
+      POSTGRES_USER: ${DB_USER_ENV}
+      POSTGRES_PASSWORD: ${DB_PASSWORD_ENV}
+    # No "ports:" on purpose: the database is reachable only on the overlay network.
+    volumes:
+      - task_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER_ENV} -d ${DB_NAME_ENV}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tasks-network
+    deploy:
+      replicas: 1
+      placement:
+        # The volume lives on one node's disk, so pin the database to it.
+        # One-off:  docker node update --label-add db=true <node-name>
+        constraints: [node.labels.db == true]
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 384M
+
+  task-service:
+    image: ensanguine/task-service:${IMAGE_TAG:-latest}   # prefer a version tag, e.g. 1.0.0
+    ports:
+      - target: ${APP_PORT_ENV:-8077}
+        published: ${APP_PORT_ENV:-8077}
+        protocol: tcp
+        mode: ingress
+    environment:
+      - APP_PORT=${APP_PORT_ENV}
+      - DB_HOST=task-db                # service name on the stack network
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME_ENV}
+      - DB_USER=${DB_USER_ENV}
+      - DB_PASSWORD=${DB_PASSWORD_ENV}
+      - JWT_PUBLIC_KEY_PATH=/run/secrets/jwt_public_key
+      - JWT_ISSUER=${JWT_ISSUER_ENV}
+      - JWT_AUDIENCE=${JWT_AUDIENCE_ENV}
+      - JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=70
+    secrets:
+      - source: jwt_public_key
+        target: jwt_public_key
+        mode: 0444
+    networks:
+      - tasks-network
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 15s
+        order: start-first
+        failure_action: rollback
+      rollback_config:
+        order: start-first
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 10
+        window: 60s
+      resources:
+        limits:
+          memory: 512M
+
+secrets:
+  jwt_public_key:
+    # Must be the PUBLIC key matching the users service's private key.
+    # Named JWT_PUBLIC_KEY_FILE (as in PROJECT-CONTEXT.md) so it can't be confused
+    # with JWT_PUBLIC_KEY_PATH, the in-container path.
+    file: ${JWT_PUBLIC_KEY_FILE}
+
+networks:
+  tasks-network:
+    driver: overlay
+
+volumes:
+  task_db_data:
