@@ -1,173 +1,325 @@
-# Deployment (CI/CD)
+# Task Service Deployment Workflow
 
-The Tasks API is tested, scanned, released, built and deployed by one GitHub Actions workflow,
-`.github/workflows/ci.yml`, on every push to `main`. This page explains what the workflow does,
-what it needs, and how to fix it when a run fails.
+## Overview
 
-## Pipeline at a glance
+Every push to `main` runs six jobs. Three gates run in parallel: **test**, **security** and **dependency-check**. Only when all three pass does the chain **release → build-and-push → deploy** run, and the build and deploy run only when the commits since the last tag warrant a new version. Because every gate finishes before semantic-release runs, a failed check never leaves a Git tag without an image.
 
 ```mermaid
 flowchart TD
-    push(["Push to main"])
-
-    subgraph checks["Checks: run in parallel, read-only"]
-        direction LR
-        test["<b>test</b><br/>Run Tests<br/>mvn test on JDK 21, H2, throwaway keys"]
-        security["<b>security</b><br/>Security Checks<br/>gitleaks, security-check.sh,<br/>image build, key scan, Trivy"]
-        depcheck["<b>dependency-check</b><br/>OWASP Dependency-Check<br/>fails on CVSS 7.0 or higher"]
-    end
-
-    release["<b>release</b><br/>Semantic Release<br/>next version from the commit messages,<br/>Git tag and GitHub release"]
-    decision{"New version<br/>released?"}
-    build["<b>build-and-push</b><br/>Build Container Image<br/>push to Docker Hub"]
-    deploy["<b>deploy</b><br/>Deploy to Swarm<br/>docker stack deploy,<br/>wait for the rolling update"]
-    stop(["Stop: nothing built or deployed"])
-
-    push --> test & security & depcheck
-    test & security & depcheck -->|all three pass| release
-    release --> decision
-    decision -->|"yes: fix or feat commits"| build
-    decision -->|"no: only ci, docs, chore commits"| stop
-    build --> deploy
+    push[Push to main] --> test[Run tests]
+    push --> security[Security checks]
+    push --> depcheck[OWASP Dependency-Check]
+    test -- pass --> release[Semantic release]
+    security -- pass --> release
+    depcheck -- pass --> release
+    test -. fails .-> stop1([Stop: any failed gate blocks the release])
+    security -. fails .-> stop1
+    depcheck -. fails .-> stop1
+    release --> newrel{New release?}
+    newrel -. no releasable commits .-> stop2([Stop, nothing to ship])
+    newrel -- yes --> build[Build and push image]
+    build --> deploy[Deploy to Swarm]
+    deploy --> rollout{Rollout healthy?}
+    rollout -- yes --> live([Live in the swarm])
+    rollout -. paused, rolled back or 10 min timeout .-> fail([Job fails])
 ```
 
-The first three jobs run in parallel and only read the repository. Nothing is tagged, built or deployed
-unless all three pass. Pull requests do not trigger the workflow; only pushes to `main` do.
+The result of a successful run is a Git tag and GitHub Release (e.g. `v1.4.0`), a Docker Hub image `task-service:1.4.0`, and the `tasks` stack on the swarm running that exact image digest.
 
-## When a push deploys, and when it does not
 
-The version comes from the commit messages since the last release
-([Conventional Commits](https://www.conventionalcommits.org/)), read by semantic-release:
+## Configuration
 
-| Commit messages since the last release include | New version | Built and deployed? |
-|---|---|---|
-| `fix: ...` | patch, e.g. 1.4.0 → 1.4.1 | Yes |
-| `feat: ...` | minor, e.g. 1.4.0 → 1.5.0 | Yes |
-| `feat!: ...` or a `BREAKING CHANGE:` footer | major, e.g. 1.4.0 → 2.0.0 | Yes |
-| only `ci:`, `docs:`, `chore:`, `test:`, `refactor:`, `style:` | none | **No.** The checks still run, but the release job publishes nothing, so `build-and-push` and `deploy` are skipped |
+Everything repo-specific lives in five `env` values at the top of the file; the jobs never hard-code names. The users service runs the same workflow with the other column's values; only these five lines differ.
 
-To ship a change, at least one commit since the last release must be a `fix:` or `feat:`.
+| Variable | User service value | Tasks service value | What it controls |
+| --- | --- | --- | --- |
+| `IMAGE_NAME` | `user-service` | `task-service` | Docker Hub repository name, pushed as `<DOCKER_USERNAME>/<IMAGE_NAME>` |
+| `STACK_NAME` | `users` | `tasks` | Swarm stack name passed to `docker stack deploy` |
+| `STACK_FILE` | `stack-tasks.yml` | `stack-tasks.yml` | Compose/stack file, committed in the repo root and copied to the manager |
+| `ENV_FILE` | `tasks.env` | `tasks.env` | Runtime settings file kept on the swarm manager only, never in git |
+| `SERVICE_NAME` | `tasks_task-service` | `tasks_task-service` | The `<stack>_<service>` name the deploy step polls for rollout status |
 
-## Container image
+The workflow-level `permissions` block gives the built-in `GITHUB_TOKEN` write access to `contents` (to push tags and create GitHub Releases), `issues` and `pull-requests` (so semantic-release can comment on what a release shipped). The three gate jobs override this with `contents: read`, so the tests and the third-party scanners run with a read-only token. `release`, `build-and-push` and `deploy` keep the workflow-level permissions.
 
-`build-and-push` pushes `<DOCKER_USERNAME>/task-service` to Docker Hub with four tags:
+## Job 0 — Run Tests (`test`)
 
-| Tag | Example | Use |
-|---|---|---|
-| the version | `1.5.0` | What you normally deploy or roll back to |
-| the Git tag | `v1.5.0` | Matches the GitHub release |
-| `latest` | `latest` | The most recent release |
-| the commit | `sha-<full commit hash>` | Ties an image to the exact commit |
+The first of three gates: if the Maven test suite fails, no version is cut, no image is built and nothing is deployed. It runs with a read-only token.
 
-The deploy job does not use a tag on its own. It passes `IMAGE_TAG=<version>@<digest>`
-(for example `1.5.0@sha256:…`), so the swarm runs exactly the image that was just built and scanned,
-even if a tag is later moved.
+1. **Checkout** the commit that was pushed.
+2. **Set up JDK 21** (Eclipse Temurin) with the Maven dependency cache enabled, so `~/.m2` is restored between runs.
+3. **Run tests** with `mvn -B -ntp test` — batch mode (`-B`) for clean CI logs and no transfer progress (`-ntp`) to keep the log short.
+4. **Upload test reports on failure** — only when a previous step failed, the `target/surefire-reports/` folder is attached to the run as an artifact named `surefire-reports`. Download it from the run's summary page to see which test broke and why.
 
-## One-time setup
+The tests are self-contained: they generate throwaway RSA keys and register their own JWT properties (`TestJwtKeys` + `@DynamicPropertySource`) and run against an in-memory H2 database. That is why this job needs no secrets, env vars or database service.
 
-### 1. GitHub repository secrets
 
-*Settings → Secrets and variables → Actions → New repository secret*
+## Job 0b — Security Checks (`security`)
 
-| Secret | Used by | Value |
-|---|---|---|
-| `DOCKER_USERNAME` | build-and-push | Docker Hub user name (also the image namespace) |
-| `DOCKER_TOKEN` | build-and-push | Docker Hub access token with read and write access, not the account password |
-| `SSH_PRIVATE_KEY` | deploy | Private key of a key pair made only for deploys, e.g. `ssh-keygen -t ed25519 -f deploy_key -N ""`. Its public half goes in the manager's `~/.ssh/authorized_keys` |
-| `SSH_KNOWN_HOSTS` | deploy | The manager's host key, from `ssh-keyscan -t ed25519 <manager-host>`. Check the fingerprint before saving it |
-| `SSH_USER` | deploy | The account the workflow logs in as on the manager |
-| `SSH_HOST` | deploy | The manager's host name or IP address |
-| `NVD_API_KEY` | dependency-check | **Optional.** Without it, Dependency-Check uses its own daily mirror of the NVD data |
+This gate looks for leaked secrets, mishandled keys and known vulnerabilities in the container image. [`README-security-checks.md`](README-security-checks.md) covers each check in detail, how to run them locally, and what they found. It runs in parallel with the tests, with a read-only token, and builds its own copy of the image to inspect, which is loaded locally and never pushed.
 
-`GITHUB_TOKEN` is provided automatically. The workflow gives it permission to push tags and releases.
+1. **Checkout with full history** (`fetch-depth: 0`), because the secret scan reads every commit.
+2. **Secret scan with gitleaks** — downloads gitleaks 8.30.1, checks the archive against its published SHA-256 before running it, then scans the whole Git history with `--redact` so any finding is masked in the log. A secret removed in a later commit still fails the scan, because it is still in the history. Rules are the gitleaks defaults plus `.gitleaks.toml` in the repo.
+3. **Key and config hygiene** — runs `scripts/security-check.sh`. Without building anything, it fails on tracked key files or `.env`, PEM or base64 private keys in any file, key handling in `.dockerignore` and the `Dockerfile`, the `jwt.*` properties, and hard-coded or defaulted passwords in the properties and compose files. Because this service reads `jwt.public-key-path`, the script also fails on any token-signing code (`Jwts.builder(`, `.signWith(`) in `src/main`: the tasks API only verifies tokens.
+4. **Build the image for scanning** — the same build context and GitHub Actions cache as `build-and-push`, so that job later reuses these layers. `pull: true` always fetches the newest base image, and `build-args: APK_REFRESH=<run id>` gives the `Dockerfile`'s `ARG APK_REFRESH` a new value on every run, so the `apk upgrade` layer is rebuilt instead of reused from the cache. Without that, an unchanged base image means an old upgrade layer, and Trivy reports CVEs that Alpine has already fixed. The image is tagged `ci-scan:<commit sha>`.
+5. **Check the image for keys** — fails if the image's environment sets `JWT_PRIVATE_KEY_BASE64` or `JWT_PRIVATE_KEY_PATH` to a value. It then exports the image's filesystem and runs `security-check.sh --image-dir` over it, so no key file was copied in. This service never holds a private key at all; only the public key is mounted, as a Swarm secret.
+6. **Vulnerability scan with Trivy** — scans the image's OS packages and jars, and fails on any HIGH or CRITICAL CVE that has a fix available (`ignore-unfixed: true`). The action is pinned to the commit of release 0.35.0 rather than a tag: according to the workflow's comment, tags 0.0.1 to 0.34.2 of `aquasecurity/trivy-action` were hijacked in March 2026 (GHSA-69fq-xp46-6x23).
 
-### 2. The swarm manager
+## Job 0c — OWASP Dependency-Check (`dependency-check`)
 
-The deploy job logs in over SSH and runs these commands on the manager:
+The third gate checks every Maven dependency against the National Vulnerability Database (NVD). It fails on any dependency with a known vulnerability of CVSS 7.0 or higher, a threshold set in `pom.xml`. It runs in parallel with the other gates, with a read-only token and a 60-minute timeout.
 
-```bash
-set -a; source tasks.env; set +a                 # load the stack's variables
-sudo -E docker stack deploy --with-registry-auth -c stack-tasks.yml tasks
-```
+1. **Checkout** and **set up JDK 21** with the Maven cache, as in the test job.
+2. **Choose the vulnerability data source**:
 
-So the manager needs:
+| `NVD_API_KEY` secret | Data source | Freshness |
+| --- | --- | --- |
+| Set | The NVD API | Freshest |
+| Not set | Dependency-Check's own mirror of the NVD data, published on GitHub | Rebuilt daily, best effort; the run log shows a notice |
 
-- **Docker in swarm mode** (`docker swarm init`, or a manager node of an existing swarm).
-- **`sudo` for `docker` without a password prompt** for `SSH_USER`, because nobody is there to type one.
-  Grant it for the docker binary only, e.g. `/etc/sudoers.d/deploy`:
-  `deployer ALL=(root) NOPASSWD: /usr/bin/docker`
-- **`~/tasks.env`** in `SSH_USER`'s home folder, holding every variable `stack-tasks.yml` uses
-  (database password, `JWT_ISSUER`, `JWT_AUDIENCE` and so on). It lives only on the manager:
-  never commit it, and keep it readable by `SSH_USER` only (`chmod 600 ~/tasks.env`).
-- **The RS256 public key** (`public.pem`) wherever `stack-tasks.yml` expects it.
-  Only the public key; the private key belongs to the Users Service alone.
-- **Docker Hub access to the image.** `--with-registry-auth` passes the manager's Docker Hub login to
-  the worker nodes. If the repository is private, log in once on the manager with `sudo docker login`.
+3. **Restore the vulnerability database** — the database is several hundred MB, so the newest copy is restored from the Actions cache and only the changes since are fetched. A fresh copy is saved after every run, with one cache per data source.
+4. **Run Dependency-Check** — `mvn dependency-check:check`, pointed at the cached data directory.
+5. **Upload the report** — always runs, pass or fail, and attaches the HTML and JSON reports as the `dependency-check-report` artifact.
 
-### 3. The stack file
+The first run, or a run after the cache expires, downloads the whole database and can take much longer than later runs.
 
-`stack-tasks.yml` must be committed in the repository root; the workflow copies it to the manager on
-every deploy. Its image line must use the `IMAGE_TAG` the workflow sets, for example:
+## Job 1 — Semantic Release (`release`)
+
+This job decides whether the push is worth a new version, based on the commit messages since the last tag. It runs only after all three gates (`test`, `security` and `dependency-check`) pass.
+
+1. **Checkout with full history** (`fetch-depth: 0`). semantic-release needs every commit and tag to work out what changed since the previous release; a shallow clone would make it miscount.
+2. **Set up Node.js** (current LTS), because semantic-release is a Node tool.
+3. **Run semantic-release** via `cycjimmy/semantic-release-action`, with `skip_npm_plugin: true` since this is a Java project and nothing is published to npm. It reads the Conventional Commit messages, picks the next version, pushes a Git tag and creates a GitHub Release with generated notes.
+4. **Print the outcome** — runs even if the release step fails (`if: always()`) and echoes the step status plus the three outputs, which makes "why didn't it release?" easy to answer from the log.
+
+The job exposes three outputs to later jobs:
+
+| Output | Example | Used by |
+| --- | --- | --- |
+| `new_release_published` | `true` / `false` | Gate on the build job |
+| `new_release_version` | `1.4.0` | Image tag and the deploy's `IMAGE_TAG` |
+| `new_release_git_tag` | `v1.4.0` | Extra image tag |
+
+How commit messages map to versions (semantic-release defaults):
+
+| Commit message | Version bump | Example |
+| --- | --- | --- |
+| `fix: ...`, `perf: ...`, `revert: ...` | Patch | 1.3.2 → 1.3.3 |
+| `feat: ...` | Minor | 1.3.2 → 1.4.0 |
+| `feat!: ...` or a `BREAKING CHANGE:` footer | Major | 1.3.2 → 2.0.0 |
+| `chore:`, `docs:`, `style:`, `refactor:`, `test:`, `build:`, `ci:` | None | No release, pipeline stops here |
+
+A push with no releasable commits is not a failure: the job succeeds with `new_release_published = false`, and the build and deploy jobs are skipped. A local Git hook rejects malformed messages before they reach `main`; see [Commit message convention](#commit-message-convention).
+
+
+## Job 2 — Build Container Image (`build-and-push`)
+
+This job builds the image from the repo's `Dockerfile` and pushes it to Docker Hub, but only when `release` reported `new_release_published == 'true'`.
+
+1. **Checkout** the code.
+2. **Set up Docker Buildx**, the builder that supports the GitHub Actions layer cache.
+3. **Log in to Docker Hub** with `DOCKER_USERNAME` and `DOCKER_TOKEN` (use an access token, not the account password).
+4. **Extract metadata** — computes the tag list and OCI labels for the image.
+5. **Build and push** with build context `.` (so the `Dockerfile` must be in the repo root), using `cache-from/cache-to: type=gha`. Most layers come straight from the cache the security job just filled. `pull: true` checks for a newer base image here too, and the build passes the same `APK_REFRESH` value as the security job in this run, so the pushed image reuses the exact upgrade layer that Trivy scanned.
+6. **Output the image digest** to the log.
+
+Every release pushes the same image under four tags:
+
+| Tag | Example | Purpose |
+| --- | --- | --- |
+| Version | `task-service:1.4.0` | The release, human-readable |
+| Git tag | `task-service:v1.4.0` | Matches the GitHub Release name |
+| `latest` | `task-service:latest` | Convenience for local pulls; the deploy does not use it |
+| Commit SHA | `task-service:sha-<full 40-char sha>` | Trace an image back to its exact commit |
+
+The job's one output is `digest` (`sha256:...`), the content hash of what was pushed. The deploy job pins to this digest so the swarm runs exactly this build, even if a tag is later moved.
+
+
+## Job 3 — Deploy to Swarm (`deploy`)
+
+This job SSHes into the swarm manager, redeploys the stack with the new image and waits up to 10 minutes for the rolling update to settle. It needs both `release` (for the version) and `build-and-push` (for the digest), so it is skipped whenever the build was skipped.
+
+**Concurrency.** The `deploy-<repository>` concurrency group means only one deploy of this repo runs at a time. With `cancel-in-progress: false`, a newer push queues behind a running deploy rather than killing it halfway through a rollout.
+
+1. **Checkout** — only to get the stack file.
+2. **Set up SSH** — writes `SSH_PRIVATE_KEY` to `~/.ssh/id_ed25519` (mode 600) and `SSH_KNOWN_HOSTS` to `~/.ssh/known_hosts`, so the manager's host key is verified rather than blindly trusted.
+3. **Copy the stack file** — `scp` sends `stack-tasks.yml` to the SSH user's home directory on the manager.
+4. **Deploy and wait** — one SSH session runs a script on the manager (details below).
+5. **Clean up the SSH key** — always runs, even after a failure, and deletes the key file from the runner.
+
+
+### What runs on the manager
+
+The runner passes five values into the remote shell: `IMAGE_TAG`, `STACK_NAME`, `STACK_FILE`, `ENV_FILE` and `SERVICE_NAME`. `IMAGE_TAG` combines version and digest, for example `1.4.0@sha256:ab12...`: the version keeps it readable in `docker service ls`, the digest makes it exact.
+
+1. **Strict mode** — `set -euo pipefail` aborts on the first error, unset variable or failed pipe.
+2. **Load runtime settings** — `set -a; source tasks.env; set +a` exports every variable in the env file. `docker stack deploy` does not read `.env` files itself, so this is how secrets such as database URLs reach the stack file's `${VAR}` placeholders.
+3. **Deploy** — `sudo -E docker stack deploy --with-registry-auth -c stack-tasks.yml tasks`. `-E` keeps the exported variables under sudo; `--with-registry-auth` forwards the manager's Docker Hub credentials to worker nodes so they can pull the image.
+4. **Poll the rollout** — every 10 seconds, up to 60 times, read the service's `UpdateStatus.State`:
+
+| State | Meaning | Result |
+| --- | --- | --- |
+| `updating` (or anything unlisted) | Rollout still in progress | Keep waiting |
+| `completed` | Every replica replaced, and each new one passed its healthcheck and stayed up through the 30-second monitor window | Print `docker stack services`, exit 0 |
+| `none` | No update recorded, e.g. the service was just created | Treated as success, exit 0 |
+| `paused`, `rollback_started`, `rollback_paused`, `rollback_completed` | The update failed and Swarm stopped or reverted it | Print the last 15 task-history lines, exit 1 |
+| Still waiting after 60 checks | Rollout took over 10 minutes | Print task history, exit 1 |
+
+The image line in `stack-tasks.yml` is `ensanguine/task-service:${IMAGE_TAG:-latest}`, so the pipeline's `IMAGE_TAG` picks the exact build. The `latest` fallback applies only to a manual `docker stack deploy` run without `IMAGE_TAG` set. If the line ever hard-codes a tag, every deploy reports success without changing anything.
+
+### Health checks and rollout behaviour
+
+The rollout is gated on Spring Boot Actuator's liveness probe: Swarm moves on to the next replica only once the new container reports `UP`, and rolls the whole update back if it never does.
+
+The healthcheck in `stack-tasks.yml` (it overrides any `HEALTHCHECK` in the `Dockerfile`):
 
 ```yaml
-services:
-  task-service:
-    image: ${DOCKER_USERNAME}/task-service:${IMAGE_TAG}
+healthcheck:
+  test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${APP_PORT_ENV}/actuator/health/liveness | grep -q UP"]
+  interval: 15s
+  timeout: 5s
+  retries: 3
+  start_period: 90s        # Spring Boot startup is slow on small VMs
 ```
 
-`DOCKER_USERNAME` is not sent by the workflow, so set it in `tasks.env`, or write the user name into the
-file. The service must be called `task-service`, so that its swarm name is `tasks_task-service`, the
-name the deploy job waits on.
+| Setting | Value | Effect |
+| --- | --- | --- |
+| `start_period` | 90s | Failed checks during the first 90 seconds don't count, so a slow Spring startup isn't mistaken for a failure |
+| `interval`, `timeout`, `retries` | 15s, 5s, 3 | After the grace period, three failed checks in a row (about 45 seconds) mark the container unhealthy |
+| Command | BusyBox `wget` on `127.0.0.1` | The runtime image has no `curl` (it was removed to cut CVEs), and `wget` is built into Alpine. `127.0.0.1` rather than `localhost`, because BusyBox `wget` does not fall back to IPv4 when `localhost` resolves to IPv6 first |
 
-If the stack file defines a `healthcheck:`, use `wget` (BusyBox), not `curl`. The runtime image has no
-`curl`, and a failing health check makes the swarm roll the update back.
+The service's `update_config` decides what Swarm does with that signal:
 
-## What the deploy job does
+| Setting | Value | Effect |
+| --- | --- | --- |
+| `parallelism` | 1 | One of the two replicas is replaced at a time |
+| `order` | `start-first` | The new container starts and must turn healthy before the old one stops, so capacity never drops below two |
+| `monitor` | 30s | After a new replica turns healthy, Swarm watches it for 30 more seconds before counting it as a success |
+| `delay` | 15s | Pause before replacing the next replica |
+| `failure_action` | `rollback` | A replica that fails the healthcheck or crashes inside the monitor window reverts the whole service to the previous image |
+| `rollback_config.order` | `start-first` | The rollback also starts old containers before stopping new ones |
 
-1. Writes the SSH key and known hosts, and copies `stack-tasks.yml` to `~/stack-tasks.yml` on the manager.
-2. Loads `~/tasks.env` and runs `docker stack deploy` with the new `IMAGE_TAG`.
-3. Polls the service's update state every 10 seconds for up to 10 minutes:
-   - `completed`: prints `docker stack services tasks` and succeeds.
-   - `rollback_started`, `rollback_completed`, `rollback_paused` or `paused`: prints the last task history
-     and fails. The swarm is still running the previous version.
-   - no answer within 10 minutes: prints the task history and fails.
-4. Deletes the SSH key from the runner, whether the deploy succeeded or not.
+In practice:
 
-Two deploys of this repository never run at the same time, and a running deploy is never cancelled
-halfway: a newer deploy waits for it to finish. If several are waiting, GitHub keeps only the newest.
+- A good release takes roughly two × (Spring startup + 45 seconds), well inside the job's 10-minute wait.
+- A release that never becomes healthy is marked unhealthy about 2 to 3 minutes in. Swarm then rolls back, the poll loop sees `rollback_started` or `rollback_completed`, and the job fails while the previous version keeps serving.
+- `start-first` briefly runs three `task-service` containers at once. With a 512 MB limit each, the nodes need about 1.5 GB free for the service during a rollout.
 
-## Rolling back
+For the check to pass, the app must serve `/actuator/health/liveness` without a token:
 
-The image of every release stays on Docker Hub. To return to an earlier version:
+- `spring-boot-starter-actuator` is on the classpath.
+- Health probes are enabled with `management.endpoint.health.probes.enabled=true`. Spring Boot turns the `liveness` and `readiness` groups on by itself only on Kubernetes, so on Swarm the path returns 404 without this property.
+- `SecurityConfig` permits `/actuator/health/**`. Otherwise the check gets a 401 and fails.
+- Only the `health` endpoint is exposed (`management.endpoints.web.exposure.include=health`), and it reports status only, not component details.
 
-```bash
-# on the swarm manager
-sudo docker service update --with-registry-auth \
-  --image <DOCKER_USERNAME>/task-service:1.4.1 tasks_task-service
+Liveness only says the application is running; it does not check PostgreSQL. A bad database setting still fails a release, because the app cannot start without its database and the crashing container triggers the rollback. But if the database goes down later, the containers stay healthy while every request that touches tasks fails. Adding `db` to the readiness group (`management.endpoint.health.group.readiness.include=readinessState,db`) and checking `/actuator/health/readiness` instead would report that, at the cost of Swarm replacing containers whenever the database is briefly unavailable.
+
+## Required secrets and server setup
+
+Six repository secrets must exist under **Settings → Secrets and variables → Actions**, and a seventh, `NVD_API_KEY`, is optional. `GITHUB_TOKEN` is provided automatically.
+
+| Secret | Used in | What to put in it |
+| --- | --- | --- |
+| `DOCKER_USERNAME` | Build | Docker Hub account or org name; also the image namespace |
+| `DOCKER_TOKEN` | Build | Docker Hub access token with read/write scope |
+| `SSH_HOST` | Deploy | Hostname or IP of the swarm manager |
+| `SSH_USER` | Deploy | Login user on the manager |
+| `SSH_PRIVATE_KEY` | Deploy | Private key (ed25519) whose public half is in that user's `~/.ssh/authorized_keys` |
+| `SSH_KNOWN_HOSTS` | Deploy | Output of `ssh-keyscan <SSH_HOST>`, verified against the real host key |
+| `NVD_API_KEY` | Dependency-Check | Optional. A free key from the NVD (nvd.nist.gov) for the freshest data; without it the job uses the daily mirror |
+| `GITHUB_TOKEN` | All jobs | Automatic; permissions come from the workflow's `permissions` block, narrowed to read-only in the gate jobs |
+
+On the swarm manager, the SSH user's home directory needs:
+
+- [ ] Docker Swarm initialised, with this host as a manager node
+- [ ] `tasks.env` in the home directory (`chmod 600`), holding every variable the stack file references:
+
+  | Variable | Example | Used for |
+  | --- | --- | --- |
+  | `DB_NAME_ENV` | `taskflow-tasks` | Database name, for `task-db` and the app |
+  | `DB_USER_ENV` | `postgres` | Database user |
+  | `DB_PASSWORD_ENV` | a long random value | Database password |
+  | `APP_PORT_ENV` | `8077` | The app's port inside the overlay network, and the health check URL |
+  | `JWT_ISSUER_ENV` | `user-service` | Must match the users service |
+  | `JWT_AUDIENCE_ENV` | `taskflow-api` | Must match the users service |
+  | `JWT_PUBLIC_KEY_FILE` | `/home/deployer/.taskflow/keys/public.pem` | Path of `public.pem` on the manager, read once into the `jwt_public_key` secret. It must be the public half of the users service's production key pair |
+
+  `IMAGE_TAG` is not in the file: the pipeline sets it on every deploy.
+- [ ] The database node labelled once with `docker node update --label-add db=true <node-name>`, because `task-db` is pinned to the node that holds its volume (the same label works if both services' databases share a node)
+- [ ] Passwordless `sudo` for `docker`, with `-E` allowed so exported variables survive (the job has no terminal to type a password)
+- [ ] Root's Docker client logged in to Docker Hub (`sudo docker login`) if the image repository is private — `--with-registry-auth` forwards those credentials to the workers
+
+In the repo:
+
+- `stack-tasks.yml` and a `Dockerfile` in the root.
+- `scripts/security-check.sh`, the key and config checker the security job runs.
+- `.gitleaks.toml`, the extra gitleaks rules and allowlist, and `.gitleaksignore`, the reviewed findings in old commits (one fingerprint per line, with the reason).
+- `dependency-check-suppressions.xml`, the reviewed Dependency-Check false positives, each with a reason and an expiry date.
+- The `dependency-check-maven` plugin in `pom.xml`, with the CVSS 7.0 failure threshold.
+
+Semantic-release also expects a release config (for example `.releaserc`) if you need anything beyond its defaults, such as a branch other than `main`.
+
+## Commit message convention
+
+semantic-release only cuts a version when commit subjects follow [Conventional Commits](https://www.conventionalcommits.org/), so a `commit-msg` Git hook in `.githooks/` rejects any other format before the commit is made.
+
+
+**One-time setup per clone.** Git does not run committed hooks on its own, so each developer runs this once from the repo root:
+
+```sh
+git config core.hooksPath .githooks
+chmod +x .githooks/commit-msg   # only if the execute bit was lost
 ```
 
-For a quick undo of the last update, `sudo docker service rollback tasks_task-service` returns to the
-previous image. Either way, the next successful pipeline run deploys the newest release again.
+**Format.** `<type>[optional scope][!]: <description>`, with a lowercase type, a lowercase scope (letters, digits, `.`, `_`, `-`) and a space after the colon. Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`. The version-bump table in [Job 1](#job-1--semantic-release-release) shows which ones trigger a release.
+
+```text
+feat(auth): add JWT authentication endpoint
+fix(db): resolve HikariCP connection pool leak
+feat(api)!: remove the v1 task endpoints
+chore(deps): update Spring Boot to 4.1.0
+```
+
+What the hook checks and allows:
+
+- Only the subject (first non-comment, non-blank line) is checked. The body and footers, including `BREAKING CHANGE:`, are free text.
+- Git's own messages pass unchanged: `Merge ...`, `Revert "..."`, and `fixup!`, `squash!` and `amend!` commits.
+- `Feat: ...` or `FIX: ...` is rejected, because semantic-release would silently ignore it.
+
+**Limits.** The hook only guards commits made locally by someone who ran the setup. Commits made on GitHub bypass it: web edits, and squash or merge commits created from a pull request. If PRs are squash-merged, the PR title becomes the commit subject on `main`, so write PR titles in the same format. Bypassing the hook with `git commit --no-verify` is possible but leaves a commit semantic-release cannot read.
 
 ## Troubleshooting
 
-| Failed job or step | Likely cause | What to do |
-|---|---|---|
-| Run Tests | A test failed | Download `surefire-reports` from the run's artifacts |
-| Security Checks → Secret scan | gitleaks found a secret, or `.gitleaks.toml` / `.gitleaksignore` is missing | See `SECURITY-CHECKS.md`. Rotate a real secret first; record reviewed old findings in `.gitleaksignore` |
-| Security Checks → Key and config hygiene | `scripts/security-check.sh` failed | Its log names the file, line and fix. Run it locally first |
-| Security Checks → Vulnerability scan | Trivy found a fixable HIGH or CRITICAL CVE in the image | Upgrade the package or base image. Do not add packages to the runtime stage |
-| OWASP Dependency-Check | A library has a CVE of 7.0 or higher | Read `dependency-check-report` in the run's artifacts. Upgrade the library, usually through the Spring Boot parent |
-| Semantic Release succeeds, later jobs skipped | No `fix:` or `feat:` commit since the last release | Expected. See "When a push deploys" above |
-| Build Container Image → login | `DOCKER_USERNAME` or `DOCKER_TOKEN` wrong, or the token lacks write access | Create a new Docker Hub access token and update the secret |
-| Deploy → Set up SSH / copy | `Permission denied (publickey)` or `Host key verification failed` | Check the public key is in `SSH_USER`'s `authorized_keys`, and refresh `SSH_KNOWN_HOSTS` |
-| Deploy → `sudo: a password is required` | No passwordless `sudo` for docker | Add the sudoers entry above |
-| Deploy → `tasks.env: No such file or directory` | The env file is missing on the manager | Create `~/tasks.env` for `SSH_USER` |
-| Deploy → `rollback_*` or `paused` | The new containers did not become healthy | Read the task history in the log; on the manager, `sudo docker service logs tasks_task-service`. Often a missing variable in `tasks.env`, a wrong key path, or a health check that fails |
-| Deploy → timed out | The update was still running after 10 minutes | Check `sudo docker service ps tasks_task-service --no-trunc` on the manager |
+Most failures show up in one specific job; start from the job that turned red.
 
+| Symptom | Likely cause | What to do |
+| --- | --- | --- |
+| `test` fails | A failing unit or integration test | Download the `surefire-reports` artifact from the run and read the failing test's report |
+| Secret scan (gitleaks) fails | A secret is in some commit, possibly one deleted later | If it is real: revoke and replace the secret first. Removing it from the files is not enough, because it stays in the history. If it is reviewed and not live (a retired secret, an expired example token, test data in an old commit): add its fingerprint to `.gitleaksignore` with a comment saying why. If it is a pattern that is never a secret: allowlist it narrowly in `.gitleaks.toml` |
+| Secret scan fails at `sha256sum` | `GITLEAKS_VERSION` was changed without updating `GITLEAKS_SHA256` | Copy the checksum for the new version from the gitleaks release page and update both values together |
+| "Key and config hygiene" or "Check the image for keys" fails | A key, `.env` or a hard-coded password is tracked or copied into the image, or the `Dockerfile` sets a `JWT_PRIVATE_KEY_*` variable | Read the script's output for the file or variable; untrack or remove it and fix `.dockerignore` or the `Dockerfile`. A private key that was ever committed must be replaced |
+| Vulnerability scan (Trivy) fails | A HIGH or CRITICAL CVE with a fix exists in the base image or a jar | For an Alpine package, the fix is usually already in Alpine: re-run, since the `apk upgrade` layer is rebuilt every run. If it persists, check that the `Dockerfile` still has `ARG APK_REFRESH` and `RUN apk upgrade --no-cache` in the runtime stage. For a jar, upgrade the dependency (often the Spring Boot parent). Don't add packages to the runtime image. Only if it truly cannot affect this service, list the CVE in a `.trivyignore` file with the reason |
+| Dependency-Check fails | A dependency has a known vulnerability of CVSS 7.0 or higher | Open the `dependency-check-report` artifact, upgrade the dependency (often a newer Spring Boot patch release). Only suppress a false positive, in `dependency-check-suppressions.xml`, with a reason and an expiry date |
+| Dependency-Check is slow, times out or reports NVD errors | No cached database (first run), or the NVD API rate-limited the job | Re-run once the cache exists; set `NVD_API_KEY`, or remove it to fall back to the mirror if the API itself is the problem |
+| Pipeline stops after `release`, build and deploy show as skipped | No `feat:`/`fix:`/breaking commits since the last tag | Expected; check the "Print Semantic Release Outcome" log. Use a releasable commit type to ship |
+| A `feat:` or `fix:` change was merged but no release was cut | The subject on `main` is not in the convention, often a squash-merge with a free-form PR title or a commit made with `--no-verify` | Check `git log --oneline` on `main`; ship the change with a correctly formatted commit |
+| `git commit` fails with "INVALID COMMIT MESSAGE FORMAT" | The hook rejected the subject | Reword it as `<type>(scope): description` with a lowercase type |
+| `release` fails with a permission or auth error | Branch protection blocks tag pushes, or token permissions were narrowed | Allow GitHub Actions to push tags, and keep `contents: write` in the workflow |
+| `build-and-push` fails at login | Wrong or expired `DOCKER_TOKEN` | Create a new Docker Hub access token and update the secret |
+| `deploy` fails at `scp` or `ssh` with host key or permission errors | Bad `SSH_KNOWN_HOSTS`, wrong key, or key not in `authorized_keys` | Re-run `ssh-keyscan`, confirm the key pair matches, test the login by hand |
+| `deploy` fails with `tasks.env: No such file or directory` | Env file missing from the SSH user's home | Create it on the manager (never commit it) |
+| `deploy` reports `rollback_started` or `rollback_completed` | A new container crashed or never passed the liveness check | Read the task history in the log, then `sudo docker service logs tasks_task-service` on the manager. The previous version is still serving |
+| Every deploy rolls back, even for small changes | The liveness check itself fails: probes not enabled (404), the path not permitted in `SecurityConfig` (401), the check calling `curl` (not in the image) or `localhost` (IPv6 first) | Run the check inside a running container: `sudo docker exec <container> wget -qO- http://127.0.0.1:<port>/actuator/health/liveness` |
+| `deploy` fails with `only updates to Labels are allowed` on `jwt_public_key` | The key file changed (the users service's key pair was rotated), but Swarm secrets cannot be changed in place | Rename the secret in the stack file (e.g. `jwt_public_key_v2`) and keep the same `target` path |
+| `deploy` times out after 10 minutes | Slow pulls, too few nodes for the update policy, or a hanging health check | Check `docker service ps` on the manager; fix the cause and re-run the job |
+| Deploy succeeds but the old version is still running | Stack file hard-codes the image tag instead of `${IMAGE_TAG}` | Change the image line to use `${IMAGE_TAG}` |
+
+**Re-running a deploy.** Use "Re-run failed jobs" on the workflow run. The version and digest outputs from the earlier jobs are reused, so the same image is rolled out again without cutting a new release.
+
+**Rolling back.** A release that fails its healthcheck is rolled back automatically, because the stack file sets `failure_action: rollback`. A release that is healthy but wrong is not. To roll that back by hand, run `sudo docker service rollback tasks_task-service` on the manager, or revert the bad commit with a `fix:` message so the pipeline ships a new patch release.
 ## Related documents
 
-- `SECURITY-CHECKS.md`: what the three check jobs cover, and how to run them locally
-- `README-Dockerfile.md`: the image build
-- `README-docker-compose.md`: running the stack locally
+- [`README.md`](README.md): what the service does, and how to run it
+- [`README-security-checks.md`](README-security-checks.md): the three check jobs, how to run them locally, and their findings
+- [`README-authentication.md`](README-authentication.md): token verification and the ownership rules
+- [`README-Dockerfile.md`](README-Dockerfile.md): the image build
+- [`README-docker-compose.md`](README-docker-compose.md): running the stack locally

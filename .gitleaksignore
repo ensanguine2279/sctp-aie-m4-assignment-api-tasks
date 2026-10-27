@@ -1,0 +1,13 @@
+# gitleaks findings reviewed and accepted (tasks service). One fingerprint per line; # starts a comment.
+#
+# --- Example Start ---
+# Reviewed 2026-xx-xx. Each entry is tied to the commit it was found in, so the same value in a NEW commit
+# is still reported. Do not add an entry for a secret that is still in use: rotate it first.
+#
+# Old HS256 signing secret (jwt.secret / JWT_SECRET). Dead since the switch to RS256: both services
+# reject HS256 tokens, so it cannot sign anything they accept. Not used in any deployment.
+# 2d132cf477a1bb5bb22267f4b5d0a7447e61fa64:run-container.sh:generic-api-key:10
+# 2d132cf477a1bb5bb22267f4b5d0a7447e61fa64:README-Dockerfile.md:generic-api-key:129
+# 2d132cf477a1bb5bb22267f4b5d0a7447e61fa64:src/test/resources/application.properties:generic-api-key:6
+# 2d132cf477a1bb5bb22267f4b5d0a7447e61fa64:src/main/resources/application.properties:generic-api-key:27
+# --- Example End ---

@@ -368,7 +368,7 @@ If `JWT_ISSUER` or `JWT_AUDIENCE` differ between the two services, token verific
 
 ## Authentication reference
 
-For detailed information on token validation, error states, and security filter mechanics, refer to `AUTHENTICATION.md`.
+For detailed information on token validation, error states, and security filter mechanics, refer to [`README-authentication.md`](README-authentication.md).
 
 ## Dockerfile
 
