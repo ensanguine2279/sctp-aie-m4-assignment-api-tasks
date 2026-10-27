@@ -372,13 +372,13 @@ For detailed information on token validation, error states, and security filter 
 
 ## Dockerfile
 
-For multi-stage build instructions and container optimization, refer to `README-Dockerfile.md`.
+For multi-stage build instructions and container optimization, refer to [`README-Dockerfile.md`](README-Dockerfile.md).
 
 ## Docker Compose
 
-For local stack orchestration and database container setup, refer to `README-docker-compose.md`.
+For local stack orchestration and database container setup, refer to [`README-docker-compose.md`](README-docker-compose.md).
 
 ## Deployment and security references
 
-- `README-deployment.md`: the CI/CD pipeline, repository secrets, swarm manager setup, rollbacks and troubleshooting.
-- `SECURITY-CHECKS.md`: the security checks, how to run them locally, and their findings.
+- [`README-deployment.md`](README-deployment.md): the CI/CD pipeline, repository secrets, swarm manager setup, rollbacks and troubleshooting.
+- [`README-security-checks.md`](README-security-checks.md): the security checks, how to run them locally, and their findings.
