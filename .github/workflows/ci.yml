@@ -1,4 +1,4 @@
-name: Test, Security Checks, Dependency Checks,  Semantic Release, Container Build & Swarm Deploy
+name: Semantic Release, Container Build & Swarm Deploy
 
 on:
   push:
@@ -11,13 +11,13 @@ permissions:
   issues: write # Required for semantic-release to comment on issues
   pull-requests: write # Required for semantic-release to comment on PRs
 
-# Tasks repo values. The users repo uses the same file with the five values in the comments.
+# For the tasks repo, change only these five values (and nothing else in the file).
 env:
-  IMAGE_NAME: task-service          # users repo: user-service
-  STACK_NAME: tasks                 # users repo: users
-  STACK_FILE: stack-tasks.yml       # users repo: stack-users.yml (must be committed in the repo root)
-  ENV_FILE: tasks.env               # users repo: users.env (lives on the swarm manager, never in git)
-  SERVICE_NAME: tasks_task-service  # users repo: users_user-service
+  IMAGE_NAME: user-service          # tasks repo: task-service
+  STACK_NAME: users                 # tasks repo: tasks
+  STACK_FILE: stack-users.yml       # tasks repo: stack-tasks.yml (must be committed in the repo root)
+  ENV_FILE: users.env               # tasks repo: tasks.env (lives on the swarm manager, never in git)
+  SERVICE_NAME: users_user-service  # tasks repo: tasks_task-service
 
 jobs:
   # JOB 0: Run the test suite. Nothing is released, built or deployed unless this passes.
@@ -102,6 +102,9 @@ jobs:
           context: .
           # Always check for a newer base image, so its security fixes are not hidden behind cached layers.
           pull: true
+          # A new value on every run, so the Dockerfile's `apk upgrade` layer is never taken from the cache.
+          # Both image builds in a run get the same value, so the pushed image reuses the scanned layer.
+          build-args: APK_REFRESH=${{ github.run_id }}
           load: true
           push: false
           tags: ${{ env.SCAN_IMAGE }}
@@ -283,6 +286,8 @@ jobs:
         with:
           context: .
           pull: true
+          # Same value as the scan build in this run, so the pushed image is the one Trivy scanned.
+          build-args: APK_REFRESH=${{ github.run_id }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

@@ -13,17 +13,21 @@ A Spring Boot REST service that manages tasks for the TaskFlow system. It enforc
 - Consistent JSON error response format (`message`, `timestamp`) across all status codes (400, 401, 403, 404, 415, 500)
 - Dockerfile and Docker Compose setup with a dedicated PostgreSQL database
 - Unit, security matrix, ownership, and web-layer tests executing against an in-memory H2 database
+- Security checks in CI on every push to `main`: OWASP Dependency-Check, a Trivy scan of the container image, a gitleaks secret scan of the whole git history, and a project-specific key-leak check. Nothing is released or deployed unless they pass
+- Automated releases and deployment: semantic versioning from commit messages, images on Docker Hub, rolling updates on a Docker Swarm
 
 ## Tech stack
 
 | Area | Technology |
 |---|---|
 | Language | Java 17 or newer (the Docker image uses 21) |
-| Framework | Spring Boot 4.1, Spring MVC, Spring Security 7, Spring Data JPA |
+| Framework | Spring Boot 4.1.2, Spring MVC, Spring Security 7, Spring Data JPA |
 | Database | PostgreSQL (H2 in tests) |
 | Tokens | JJWT 0.13 (RS256 signature verification only) |
 | Build | Maven (wrapper included: `./mvnw`) |
 | Tests | JUnit 5, Mockito, AssertJ, MockMvc |
+| CI/CD | GitHub Actions, semantic-release, Docker Hub, Docker Swarm |
+| Security scanning | OWASP Dependency-Check 13.0.0, Trivy, gitleaks 8.30.1 |
 
 ## Verification key (RS256)
 
@@ -77,7 +81,7 @@ Prerequisites: JDK 17+ and a running PostgreSQL database.
 ```bash
 export SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5433/taskflow-tasks
 export SPRING_DATASOURCE_USERNAME=postgres
-export SPRING_DATASOURCE_PASSWORD=postgrespassword
+export SPRING_DATASOURCE_PASSWORD='<your-database-password>'
 export SPRING_JPA_HIBERNATE_DDL_AUTO=update
 export JWT_PUBLIC_KEY_PATH=$HOME/.taskflow/keys/public.pem
 export JWT_ISSUER=user-service
@@ -259,6 +263,18 @@ src/main/java/sg/edu/ntu/taskflow_api/task
 └── service      TaskService, TaskServiceImpl
 ```
 
+Project root:
+
+```
+.github/workflows/ci.yml           CI/CD pipeline: tests, security checks, release, build, deploy
+scripts/security-check.sh          Key-leak and secret-handling check (shared with the Users Service)
+.gitleaks.toml, .gitleaksignore    gitleaks rules and reviewed findings in old commits
+dependency-check-suppressions.xml  Reviewed Dependency-Check false positives, each with a reason and expiry date
+stack-tasks.yml                    Docker Swarm stack, deployed by the pipeline
+Dockerfile, docker-compose.yml     Image build and local stack
+smoke-test.sh                      End-to-end test against the running stack
+```
+
 ## Testing
 
 Execute tests using Maven Wrapper:
@@ -291,13 +307,43 @@ Run `smoke-test.sh` from the project root against the active Docker Compose stac
 
 The smoke test logs into the Users Service, obtains a real JWT, executes task creation, reading, completion, and listing scenarios, verifies ownership isolation across two test users, and sends forged, expired, tampered, and malformed tokens to confirm proper rejection across the stack.
 
-## Deployment checklist
+## Security checks
 
-- Mount `public.pem` as a read-only secret file at `/run/secrets/jwt_public_key` or set `JWT_PUBLIC_KEY_PATH`.
+Every push to `main` runs these checks in CI. Nothing is released, built or deployed unless all of them pass.
+
+| Check | What it catches |
+|---|---|
+| OWASP Dependency-Check | Libraries with known vulnerabilities (CVSS 7.0 or higher fails the build) |
+| Trivy | Known vulnerabilities in the container image: Alpine packages and the jars inside the app |
+| gitleaks | Passwords, tokens and keys anywhere in the git history, including commits where they were later deleted |
+| `scripts/security-check.sh` | Key files or private keys in the repository or the image, default passwords in the properties and compose files, and any token-signing code in this verify-only service |
+
+Run the quick ones before you push:
+
+```bash
+./scripts/security-check.sh            # seconds
+gitleaks git --redact --verbose .      # whole history
+```
+
+`SECURITY-CHECKS.md` describes every check, how to run all of them locally, and what was found and fixed.
+
+## Deployment
+
+Pushes to `main` are released and deployed automatically by `.github/workflows/ci.yml`:
+
+1. Tests and the security checks run in parallel.
+2. semantic-release works out the next version from the commit messages (`fix:` is a patch, `feat:` a minor version) and creates the Git tag and GitHub release.
+3. The image is built and pushed to Docker Hub as `<DOCKER_USERNAME>/task-service`, tagged with the version, the Git tag, `latest` and the commit.
+4. The stack is deployed to the Docker Swarm with `docker stack deploy`, pinned to the new image's digest, and the job waits for the rolling update to finish.
+
+A push with only `ci:`, `docs:` or `chore:` commits runs the checks but does not deploy. The repository secrets, the swarm manager setup, rollbacks and troubleshooting are covered in `README-deployment.md`.
+
+Before the first production deploy:
+
 - Ensure `JWT_ISSUER` (`user-service`) and `JWT_AUDIENCE` (`taskflow-api`) match the configuration on the Users Service.
-- Ensure database credentials (`SPRING_DATASOURCE_*`) are injected via environment variables.
+- Make `public.pem` available on the swarm and keep database credentials in the manager's `tasks.env`, never in the repository.
 - Configure a reverse proxy (Nginx, Caddy, or Traefik) to handle TLS termination in front of port 8077.
-- Replace `spring.jpa.hibernate.ddl-auto=create` or `update` with database migration scripts (Flyway or Liquibase) before deploying to production environments.
+- Replace `spring.jpa.hibernate.ddl-auto=create` or `update` with database migration scripts (Flyway or Liquibase) before keeping real data.
 
 ## Integration with Users Service
 
@@ -331,3 +377,8 @@ For multi-stage build instructions and container optimization, refer to `README-
 ## Docker Compose
 
 For local stack orchestration and database container setup, refer to `README-docker-compose.md`.
+
+## Deployment and security references
+
+- `README-deployment.md`: the CI/CD pipeline, repository secrets, swarm manager setup, rollbacks and troubleshooting.
+- `SECURITY-CHECKS.md`: the security checks, how to run them locally, and their findings.
