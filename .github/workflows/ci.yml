@@ -1,4 +1,4 @@
-name: Semantic Release, Container Build & Swarm Deploy
+name: Test, Security Checks, Dependency Checks,  Semantic Release, Container Build & Swarm Deploy
 
 on:
   push:
@@ -11,19 +11,21 @@ permissions:
   issues: write # Required for semantic-release to comment on issues
   pull-requests: write # Required for semantic-release to comment on PRs
 
-# For the tasks repo, change only these five values (and nothing else in the file).
+# Tasks repo values. The users repo uses the same file with the five values in the comments.
 env:
-  IMAGE_NAME: task-service
-  STACK_NAME: tasks
-  STACK_FILE: stack-tasks.yml
-  ENV_FILE: tasks.env
-  SERVICE_NAME: tasks_task-service
+  IMAGE_NAME: task-service          # users repo: user-service
+  STACK_NAME: tasks                 # users repo: users
+  STACK_FILE: stack-tasks.yml       # users repo: stack-users.yml (must be committed in the repo root)
+  ENV_FILE: tasks.env               # users repo: users.env (lives on the swarm manager, never in git)
+  SERVICE_NAME: tasks_task-service  # users repo: users_user-service
 
 jobs:
   # JOB 0: Run the test suite. Nothing is released, built or deployed unless this passes.
   test:
     name: Run Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -49,10 +51,162 @@ jobs:
           path: target/surefire-reports/
           if-no-files-found: ignore
 
+  # JOB 0b: Security gate, in parallel with the tests. Nothing is released, built or deployed
+  # unless this passes, so a failed check never leaves a Git tag without an image.
+  security:
+    name: Security Checks
+    runs-on: ubuntu-latest
+    # Read-only: this job runs third-party scanners and needs no write access.
+    permissions:
+      contents: read
+    env:
+      SCAN_IMAGE: ci-scan:${{ github.sha }}
+
+    steps:
+      - name: Checkout repository (full history, for the secret scan)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Passwords, tokens, API keys and private keys in every commit, including ones deleted later
+      # (a secret removed in a later commit is still in the history). Rules: gitleaks defaults plus .gitleaks.toml.
+      # The binary is checked against its published SHA-256 before it runs.
+      - name: Secret scan (gitleaks, full history)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSLf -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          cd "$GITHUB_WORKSPACE"
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose --no-banner .
+
+      # Fast, no build: tracked keys or .env, PEM or base64 private keys in any file,
+      # .dockerignore and Dockerfile key handling, the jwt.* properties, and
+      # hard-coded or defaulted passwords in the properties and compose files.
+      - name: Key and config hygiene
+        run: |
+          chmod +x scripts/security-check.sh
+          ./scripts/security-check.sh
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Same context and cache as build-and-push, so that job reuses these layers. Loaded locally, never pushed.
+      - name: Build image for scanning
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Always check for a newer base image, so its security fixes are not hidden behind cached layers.
+          pull: true
+          load: true
+          push: false
+          tags: ${{ env.SCAN_IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Keys are mounted (compose, swarm) or passed at run time (Railway), never baked in.
+      - name: Check the image for keys
+        run: |
+          env_hits=$(docker image inspect "$SCAN_IMAGE" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+            | grep -E '^JWT_PRIVATE_KEY_(BASE64|PATH)=.+' | cut -d= -f1 || true)
+          if [ -n "$env_hits" ]; then
+            echo "The image sets a JWT private key variable: $env_hits"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/image-fs"
+          cid=$(docker create "$SCAN_IMAGE")
+          docker export "$cid" | tar -x -C "$RUNNER_TEMP/image-fs" --exclude='proc/*' --exclude='sys/*' --exclude='dev/*'
+          docker rm "$cid" >/dev/null
+          ./scripts/security-check.sh --image-dir "$RUNNER_TEMP/image-fs"
+
+      # Known CVEs in the base image and the jars. Fails on HIGH or CRITICAL that have a fix.
+      # Pinned by commit SHA: tags 0.0.1 to 0.34.2 of this action were hijacked in March 2026
+      # (GHSA-69fq-xp46-6x23). This commit is release 0.35.0, which was not affected.
+      - name: Vulnerability scan
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          version: 'v0.69.3'
+          image-ref: ${{ env.SCAN_IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+  # JOB 0c: OWASP Dependency-Check, in parallel with the tests. Fails on any dependency with a
+  # known vulnerability of CVSS 7.0 or higher (configured in pom.xml). The HTML report is kept either way.
+  dependency-check:
+    name: OWASP Dependency-Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      # Optional. Empty when the secret is not set, and then the mirror is used (next steps).
+      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # Where the vulnerability data comes from:
+      #   - NVD API, when the NVD_API_KEY secret is set (freshest data);
+      #   - otherwise Dependency-Check's own mirror of the NVD data, rebuilt daily from the NVD API
+      #     and published on GitHub. No key needed, data at most about a day old (best effort).
+      - name: Choose the vulnerability data source
+        id: source
+        run: |
+          if [ -n "$NVD_API_KEY" ]; then
+            echo "name=nvd-api" >> "$GITHUB_OUTPUT"
+            echo "args=" >> "$GITHUB_OUTPUT"
+            echo "Using the NVD API with the NVD_API_KEY secret."
+          else
+            echo "name=mirror" >> "$GITHUB_OUTPUT"
+            echo "args=-DnvdDatafeedUrl=https://dependency-check.github.io/DependencyCheck_Builder/nvd_cache/nvdcve-{0}.json.gz" >> "$GITHUB_OUTPUT"
+            echo "::notice::No NVD_API_KEY secret: using the Dependency-Check NVD mirror (updated daily)."
+          fi
+
+      # The vulnerability database is several hundred MB. Restore the newest copy and only fetch
+      # what changed since; a fresh copy is saved after every run. One cache per data source.
+      - name: Restore the vulnerability database
+        uses: actions/cache@v6
+        with:
+          path: ~/.dependency-check-data
+          key: dependency-check-data-${{ runner.os }}-${{ steps.source.outputs.name }}-${{ github.run_id }}
+          restore-keys: dependency-check-data-${{ runner.os }}-${{ steps.source.outputs.name }}-
+
+      - name: Run Dependency-Check
+        env:
+          SOURCE_ARGS: ${{ steps.source.outputs.args }}
+        run: |
+          # SOURCE_ARGS is empty or a single argument, so it is passed unquoted on purpose.
+          # shellcheck disable=SC2086
+          mvn -B -ntp dependency-check:check -DdataDirectory="$HOME/.dependency-check-data" $SOURCE_ARGS
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: dependency-check-report
+          path: |
+            target/dependency-check-report.html
+            target/dependency-check-report.json
+          if-no-files-found: ignore
+
   # JOB 1: Calculate version and create Git Tag + GitHub Release
   release:
     name: Semantic Release
-    needs: test
+    needs: [test, security, dependency-check]
     runs-on: ubuntu-latest
     outputs:
       new_release_published: ${{ steps.semantic.outputs.new_release_published }}
@@ -128,6 +282,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          pull: true
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
